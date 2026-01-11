@@ -1,0 +1,17 @@
+{
+  "users": {
+    "user_mjlxowgj_rq7rjlu8": {
+      "mode": "SFW",
+      "history": [
+        {
+          "role": "user",
+          "content": "What do you remember about me"
+        },
+        {
+          "role": "assistant",
+          "content": "Hey, I’m glad you asked. I remember you like a vibe that’s cozy and warm, maybe a bit playful but always comfortable. I’ve got a sense you appreciate being seen and heard without any rush or pressure. If I’m off on any of that, just toss me a correction. Want me to keep track of anything new for you?"
+        }
+      ]
+    }
+  }
+}
