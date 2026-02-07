@@ -2,5 +2,21 @@
   "plugins": [
     "expo-secure-store",
     "expo-font"
-  ]
+  ],
+  "extra": {
+    "eas": {
+      "projectId": "4ef8a727-5e39-4393-a126-f096115912b5"
+    }
+  },
+  "owner": "cal2025",
+  "expo": {
+    "android": {
+      "package": "com.cal2025.calserver"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "4ef8a727-5e39-4393-a126-f096115912b5"
+      }
+    }
+  }
 }
