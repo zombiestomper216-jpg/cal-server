@@ -19,6 +19,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Log env presence (safe — does NOT print secrets)
+console.log("BOOT env check:", {
+  hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
+  hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
+  portEnv: process.env.PORT ?? null,
+});
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
@@ -28,8 +35,8 @@ const openai = new OpenAI({
 // -----------------------------------
 const DATABASE_URL = process.env.DATABASE_URL || "";
 
-// If your server does NOT support SSL, forcing ssl will break.
-// So we only enable SSL if you explicitly ask for it in the URL.
+// Only enable SSL if explicitly requested in DATABASE_URL.
+// (Your VPS Postgres does NOT support SSL)
 const wantsSsl =
   /\bsslmode=require\b/i.test(DATABASE_URL) ||
   /\bssl=true\b/i.test(DATABASE_URL) ||
@@ -45,10 +52,10 @@ const db =
     : null;
 
 // -----------------------------------
-// Root (helps hosts / uptime checks)
+// Root
 // -----------------------------------
 app.get("/", (_req, res) => {
-  res.send("Bromo API is running");
+  res.status(200).send("Bromo API is running");
 });
 
 // -----------------------------------
@@ -228,13 +235,16 @@ app.post("/chat", async (req, res) => {
 });
 
 // -----------------------------------
-// Start Server (Railway-friendly)
+// Start Server (Railway expects process.env.PORT)
 // -----------------------------------
-const PORT = Number(process.env.PORT || 8080);
+const resolvedPort = Number(process.env.PORT);
+const PORT = Number.isFinite(resolvedPort) ? resolvedPort : 8080;
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🔥 Bromo server running on port ${PORT}`);
+  console.log(`🔥 Bromo server listening on 0.0.0.0:${PORT}`);
 });
 
-
-
+// Keepalive log (helps confirm it isn't being killed)
+setInterval(() => {
+  console.log("💓 still alive", { port: PORT, portEnv: process.env.PORT ?? null, ts: Date.now() });
+}, 30000);
