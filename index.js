@@ -156,6 +156,16 @@ function softenEarlySnap(reply, messages) {
   return reply;
 }
 
+function softenEarlySnap(reply, messages) {
+  if (!Array.isArray(messages) || messages.length <= 1) {
+    const r = String(reply || "").trim().toLowerCase();
+    if (r === "what do you want?" || r === "focus. what do you want?") {
+      return "Yeah. I’m here.";
+    }
+  }
+  return reply;
+}
+
 
   const minorPatterns = [
     /\bminor\b/i,
