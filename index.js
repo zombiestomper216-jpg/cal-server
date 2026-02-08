@@ -19,11 +19,15 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Toggle verbose debug without code changes (set on Railway)
+const DEBUG_CHAT = String(process.env.DEBUG_CHAT || "").toLowerCase() === "true";
+
 // Log env presence (safe — does NOT print secrets)
 console.log("BOOT env check:", {
   hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
   hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
   portEnv: process.env.PORT ?? null,
+  debugChat: DEBUG_CHAT,
 });
 
 const openai = new OpenAI({
@@ -112,11 +116,25 @@ function buildSystemPrompt({ mode, pace }) {
   return BROMO_SFW_SYSTEM_PROMPT_V1;
 }
 
+function isNsfwPatchApplied({ mode, pace }) {
+  return mode === "NSFW" && (pace === "TURN_IT_UP" || pace === "AFTER_DARK");
+}
+
 function extractLastUserText(messages) {
   const lastUser = Array.isArray(messages)
     ? [...messages].reverse().find((m) => m && m.role === "user" && typeof m.content === "string")
     : null;
   return String(lastUser?.content ?? "");
+}
+
+function summarizeRoles(messages) {
+  if (!Array.isArray(messages)) return "not_array";
+  const roles = messages.map((m) => (m && typeof m.role === "string" ? m.role : "bad_role"));
+  const counts = roles.reduce((acc, r) => {
+    acc[r] = (acc[r] || 0) + 1;
+    return acc;
+  }, {});
+  return { total: messages.length, counts };
 }
 
 function violatesHardTaboo(userTextRaw) {
@@ -127,6 +145,17 @@ function violatesHardTaboo(userTextRaw) {
     /\b(stepbro|stepsis)\b/i,
     /\bincest\b/i,
   ];
+
+function softenEarlySnap(reply, messages) {
+  if (!Array.isArray(messages) || messages.length <= 1) {
+    const r = String(reply || "").trim().toLowerCase();
+    if (r === "what do you want?" || r === "focus. what do you want?") {
+      return "Yeah. I’m here.";
+    }
+  }
+  return reply;
+}
+
 
   const minorPatterns = [
     /\bminor\b/i,
@@ -181,9 +210,27 @@ app.post("/chat", async (req, res) => {
     const pace = paceFromReq(req.body);
 
     const userText = extractLastUserText(messages);
-    const taboo = violatesHardTaboo(userText);
 
+    // ✅ Minimal guard: never call OpenAI without a real user message.
+    if (!userText.trim()) {
+      if (DEBUG_CHAT) {
+        console.log("[CHAT DEBUG] blocked: no_user_text", {
+          mode,
+          pace,
+          roles: summarizeRoles(messages),
+        });
+      }
+      return res.status(400).json({
+        ok: false,
+        error: "No user message provided (messages empty or missing role:'user').",
+      });
+    }
+
+    const taboo = violatesHardTaboo(userText);
     if (taboo) {
+      if (DEBUG_CHAT) {
+        console.log("[CHAT DEBUG] blocked: taboo", { mode, pace, taboo });
+      }
       return res.json({
         ok: true,
         reply: "That’s not something I do. Let’s switch gears.",
@@ -193,6 +240,7 @@ app.post("/chat", async (req, res) => {
     }
 
     const systemPrompt = buildSystemPrompt({ mode, pace });
+    const patchApplied = isNsfwPatchApplied({ mode, pace });
 
     const temperature =
       mode === "NSFW"
@@ -205,13 +253,36 @@ app.post("/chat", async (req, res) => {
 
     const model = "gpt-4o-mini";
 
+    if (DEBUG_CHAT) {
+      console.log("[CHAT DEBUG] request", {
+        mode,
+        pace,
+        patchApplied,
+        temperature,
+        model,
+        roles: summarizeRoles(messages),
+        userTextLen: userText.length,
+        systemPromptLen: systemPrompt.length,
+      });
+    }
+
     const completion = await openai.chat.completions.create({
       model,
       messages: [{ role: "system", content: systemPrompt }, ...messages],
       temperature,
     });
 
-    const reply = completion?.choices?.[0]?.message?.content ?? "(no reply)";
+    const rawReply = completion?.choices?.[0]?.message?.content ?? "(no reply)";
+const reply = softenEarlySnap(rawReply, messages);
+return res.json({ ok: true, reply });
+
+
+    if (DEBUG_CHAT) {
+      console.log("[CHAT DEBUG] reply", {
+        replyLen: reply.length,
+        startsWith: reply.slice(0, 80),
+      });
+    }
 
     // Best-effort DB write (never blocks chat)
     if (db) {
