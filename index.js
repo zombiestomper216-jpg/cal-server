@@ -40,7 +40,6 @@ const openai = new OpenAI({
 const DATABASE_URL = process.env.DATABASE_URL || "";
 
 // Only enable SSL if explicitly requested in DATABASE_URL.
-// (Your VPS Postgres does NOT support SSL)
 const wantsSsl =
   /\bsslmode=require\b/i.test(DATABASE_URL) ||
   /\bssl=true\b/i.test(DATABASE_URL) ||
@@ -137,26 +136,7 @@ function summarizeRoles(messages) {
   return { total: messages.length, counts };
 }
 
-function violatesHardTaboo(userTextRaw) {
-  const t = String(userTextRaw || "").toLowerCase();
-
-  const incestPatterns = [
-    /\bstep[-\s]?(brother|sister|dad|mom|father|mother|son|daughter)\b/i,
-    /\b(stepbro|stepsis)\b/i,
-    /\bincest\b/i,
-  ];
-
-const reply = softenEarlySnap(rawReply, messages);
-
-  if (!Array.isArray(messages) || messages.length <= 1) {
-    const r = String(reply || "").trim().toLowerCase();
-    if (r === "what do you want?" || r === "focus. what do you want?") {
-      return "Yeah. I’m here.";
-    }
-  }
-  return reply;
-}
-
+// Minimal post-gen guard to prevent curt default opener on early turns
 function softenEarlySnap(reply, messages) {
   if (!Array.isArray(messages) || messages.length <= 1) {
     const r = String(reply || "").trim().toLowerCase();
@@ -167,6 +147,14 @@ function softenEarlySnap(reply, messages) {
   return reply;
 }
 
+function violatesHardTaboo(userTextRaw) {
+  const t = String(userTextRaw || "").toLowerCase();
+
+  const incestPatterns = [
+    /\bstep[-\s]?(brother|sister|dad|mom|father|mother|son|daughter)\b/i,
+    /\b(stepbro|stepsis)\b/i,
+    /\bincest\b/i,
+  ];
 
   const minorPatterns = [
     /\bminor\b/i,
@@ -222,7 +210,7 @@ app.post("/chat", async (req, res) => {
 
     const userText = extractLastUserText(messages);
 
-    // ✅ Minimal guard: never call OpenAI without a real user message.
+    // Never call OpenAI without a real user message.
     if (!userText.trim()) {
       if (DEBUG_CHAT) {
         console.log("[CHAT DEBUG] blocked: no_user_text", {
@@ -284,9 +272,7 @@ app.post("/chat", async (req, res) => {
     });
 
     const rawReply = completion?.choices?.[0]?.message?.content ?? "(no reply)";
-const reply = softenEarlySnap(rawReply, messages);
-return res.json({ ok: true, reply });
-
+    const reply = softenEarlySnap(rawReply, messages);
 
     if (DEBUG_CHAT) {
       console.log("[CHAT DEBUG] reply", {
