@@ -146,7 +146,8 @@ function violatesHardTaboo(userTextRaw) {
     /\bincest\b/i,
   ];
 
-function softenEarlySnap(reply, messages) {
+const reply = softenEarlySnap(rawReply, messages);
+
   if (!Array.isArray(messages) || messages.length <= 1) {
     const r = String(reply || "").trim().toLowerCase();
     if (r === "what do you want?" || r === "focus. what do you want?") {
