@@ -192,6 +192,96 @@ function violatesHardTaboo(userTextRaw) {
   return null;
 }
 
+// Memory Detection Patterns and Logic
+// Add this section after the existing helper functions in index.js
+
+// -----------------------------------
+// Memory Detection (Phase 3)
+// -----------------------------------
+
+/**
+ * Heuristic patterns for detecting memorable information
+ */
+const MEMORY_PATTERNS = {
+  preferences: [
+    /\b(?:i|i'm|im)\s+(?:really\s+)?(?:into|love|like|enjoy|prefer)\s+(.+?)(?:\.|,|$)/i,
+    /\b(?:i|i'm|im)\s+(?:a\s+)?(?:big\s+)?fan\s+of\s+(.+?)(?:\.|,|$)/i,
+  ],
+  dislikes: [
+    /\b(?:i|i'm|im)\s+not\s+(?:into|a fan of|interested in)\s+(.+?)(?:\.|,|$)/i,
+    /\b(?:i|i'm|im)\s+(?:really\s+)?(?:hate|dislike|can't stand)\s+(.+?)(?:\.|,|$)/i,
+    /\bdon't\s+(?:call me|use)\s+(.+?)(?:\.|,|$)/i,
+  ],
+  identity: [
+    /\b(?:my\s+name\s+is|i'm|im|call me)\s+([A-Z][a-z]+)(?:\.|,|$)/i,
+    /\b(?:i|i'm|im)\s+a\s+(\w+)(?:\s+(?:by|as a)\s+)?(?:profession|trade)?(?:\.|,|$)/i,
+  ],
+  activities: [
+    /\b(?:i|i'm|im)\s+(?:currently\s+)?(?:working on|studying|learning)\s+(.+?)(?:\.|,|$)/i,
+    /\b(?:i|i'm|im)\s+(?:trying to|planning to)\s+(.+?)(?:\.|,|$)/i,
+  ],
+  boundaries: [
+    /\bnever\s+(?:call me|say|use)\s+(.+?)(?:\.|,|$)/i,
+    /\bdon't\s+(?:ever\s+)?(?:mention|bring up|talk about)\s+(.+?)(?:\.|,|$)/i,
+  ],
+};
+
+/**
+ * Detect potential memories from user text using heuristics
+ * Returns array of detected facts with suggested key/value pairs
+ */
+function detectMemoriesHeuristic(userText) {
+  const detected = [];
+  const text = userText.toLowerCase();
+
+  // Check each pattern category
+  for (const [category, patterns] of Object.entries(MEMORY_PATTERNS)) {
+    for (const pattern of patterns) {
+      const match = userText.match(pattern);
+      if (match && match[1]) {
+        const value = match[1].trim();
+        
+        // Skip very short matches (likely false positives)
+        if (value.length < 3) continue;
+        
+        // Generate a key based on category and content
+        const key = `${category}_${value.toLowerCase().replace(/\s+/g, '_').substring(0, 30)}`;
+        
+        detected.push({
+          category,
+          key,
+          value: formatMemoryValue(category, value),
+          confidence: 'low', // User-confirmed memories upgrade to 'high'
+          matchedPattern: pattern.source,
+        });
+      }
+    }
+  }
+
+  return detected;
+}
+
+/**
+ * Format detected value into a proper memory statement
+ */
+function formatMemoryValue(category, rawValue) {
+  switch (category) {
+    case 'preferences':
+      return `User likes ${rawValue}`;
+    case 'dislikes':
+      return `User dislikes ${rawValue}`;
+    case 'identity':
+      return `User is ${rawValue}`;
+    case 'activities':
+      return `User is ${rawValue}`;
+    case 'boundaries':
+      return `Never ${rawValue}`;
+    default:
+      return rawValue;
+  }
+}
+
+
 // -----------------------------------
 // Auth (temporary / dev)
 // -----------------------------------
@@ -543,6 +633,53 @@ app.delete("/memories/:id", async (req, res) => {
     return res.status(500).json({ ok: false, error: "Failed to delete memory" });
   }
 });
+
+// -----------------------------------
+// Memory Detection Endpoint (Phase 3)
+// Add this after the existing /memories endpoints
+// -----------------------------------
+
+// POST /detect-memory - Analyze recent messages for memorable facts
+app.post("/detect-memory", async (req, res) => {
+  try {
+    const { messages = [], mode = "SFW" } = req.body;
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "Messages array required",
+      });
+    }
+
+    if (DEBUG_CHAT) {
+      console.log("[DETECT DEBUG] Analyzing", messages.length, "messages for memories");
+    }
+
+    // Combine recent user messages for analysis
+    const userMessages = messages
+      .filter(m => m.role === 'user')
+      .map(m => m.content)
+      .join(' ');
+
+    // Use heuristic detection
+    const detected = detectMemoriesHeuristic(userMessages);
+
+    if (DEBUG_CHAT) {
+      console.log("[DETECT DEBUG] Found", detected.length, "potential memories");
+    }
+
+    // Return detected memories for user confirmation
+    return res.json({
+      ok: true,
+      detected: detected.slice(0, 3), // Max 3 suggestions at once
+      count: detected.length,
+    });
+  } catch (err) {
+    console.error("DETECT MEMORY ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Detection failed" });
+  }
+});
+
 
 // -----------------------------------
 // Start Server (Railway expects process.env.PORT)
