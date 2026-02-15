@@ -105,14 +105,26 @@ function paceFromReq(reqBody) {
   return "NORMAL";
 }
 
-function buildSystemPrompt({ mode, pace }) {
+function buildSystemPrompt({ mode, pace, memories = [] }) {
+  let basePrompt = "";
+  
   if (mode === "NSFW") {
     if (pace === "TURN_IT_UP" || pace === "AFTER_DARK") {
-      return `${BROMO_NSFW_SYSTEM_PROMPT_V1}\n\n${NSFW_BEHAVIOR_PATCH}`;
+      basePrompt = `${BROMO_NSFW_SYSTEM_PROMPT_V1}\n\n${NSFW_BEHAVIOR_PATCH}`;
+    } else {
+      basePrompt = BROMO_NSFW_SYSTEM_PROMPT_V1;
     }
-    return BROMO_NSFW_SYSTEM_PROMPT_V1;
+  } else {
+    basePrompt = BROMO_SFW_SYSTEM_PROMPT_V1;
   }
-  return BROMO_SFW_SYSTEM_PROMPT_V1;
+
+  // Add memories if present
+  if (memories && memories.length > 0) {
+    const memoryText = memories.map(m => `- ${m.value}`).join('\n');
+    basePrompt += `\n\nREMEMBERED FACTS:\n${memoryText}`;
+  }
+
+  return basePrompt;
 }
 
 function isNsfwPatchApplied({ mode, pace }) {
@@ -205,7 +217,13 @@ app.post("/auth", (req, res) => {
 // -----------------------------------
 app.post("/chat", async (req, res) => {
   try {
-    const { messages = [], mode = "SFW", threadSummary = null, recentMessages = [] } = req.body;
+    const { 
+      messages = [], 
+      mode = "SFW", 
+      threadSummary = null, 
+      recentMessages = [],
+      memories = []
+    } = req.body;
     const pace = paceFromReq(req.body);
 
     const userText = extractLastUserText(messages);
@@ -238,7 +256,7 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    const systemPrompt = buildSystemPrompt({ mode, pace });
+    const systemPrompt = buildSystemPrompt({ mode, pace, memories });
     const patchApplied = isNsfwPatchApplied({ mode, pace });
 
     const temperature =
@@ -264,6 +282,7 @@ app.post("/chat", async (req, res) => {
         systemPromptLen: systemPrompt.length,
         hasSummary: !!threadSummary,
         recentMessagesCount: recentMessages.length,
+        memoriesCount: memories.length,
       });
     }
 
@@ -324,7 +343,7 @@ app.post("/chat", async (req, res) => {
 });
 
 // -----------------------------------
-// Summarize Endpoint (NEW)
+// Summarize Endpoint
 // -----------------------------------
 app.post("/summarize", async (req, res) => {
   try {
@@ -387,6 +406,141 @@ Keep it brief and factual. This will be used as context for future messages.`;
   } catch (err) {
     console.error("SUMMARIZE ERROR:", err);
     return res.status(500).json({ ok: false, error: "Summarization failed" });
+  }
+});
+
+// -----------------------------------
+// Memory Endpoints (Phase 2)
+// -----------------------------------
+
+// GET /memories - List all memories for a device
+app.get("/memories", async (req, res) => {
+  try {
+    const { device_id, mode } = req.query;
+
+    if (!device_id) {
+      return res.status(400).json({
+        ok: false,
+        error: "device_id required",
+      });
+    }
+
+    let query = "SELECT * FROM memories WHERE device_id = $1 AND confidence = 'high'";
+    const params = [device_id];
+
+    // Filter by mode if specified
+    if (mode) {
+      query += " AND (mode = $2 OR mode IS NULL)";
+      params.push(mode);
+    }
+
+    query += " ORDER BY created_at DESC";
+
+    const result = await db.query(query, params);
+
+    return res.json({
+      ok: true,
+      memories: result.rows,
+    });
+  } catch (err) {
+    console.error("GET /memories error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to fetch memories" });
+  }
+});
+
+// POST /memories - Create a new memory
+app.post("/memories", async (req, res) => {
+  try {
+    const { device_id, key, value, mode = null } = req.body;
+
+    if (!device_id || !key || !value) {
+      return res.status(400).json({
+        ok: false,
+        error: "device_id, key, and value required",
+      });
+    }
+
+    const result = await db.query(
+      `INSERT INTO memories (device_id, key, value, mode, confidence)
+       VALUES ($1, $2, $3, $4, 'high')
+       ON CONFLICT (device_id, key) 
+       DO UPDATE SET value = $3, mode = $4, updated_at = NOW()
+       RETURNING *`,
+      [device_id, key, value, mode]
+    );
+
+    return res.json({
+      ok: true,
+      memory: result.rows[0],
+    });
+  } catch (err) {
+    console.error("POST /memories error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to create memory" });
+  }
+});
+
+// PUT /memories/:id - Update a memory
+app.put("/memories/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { value, mode } = req.body;
+
+    if (!value) {
+      return res.status(400).json({
+        ok: false,
+        error: "value required",
+      });
+    }
+
+    const result = await db.query(
+      `UPDATE memories 
+       SET value = $1, mode = $2, updated_at = NOW()
+       WHERE id = $3
+       RETURNING *`,
+      [value, mode || null, id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: "Memory not found",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      memory: result.rows[0],
+    });
+  } catch (err) {
+    console.error("PUT /memories/:id error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to update memory" });
+  }
+});
+
+// DELETE /memories/:id - Delete a memory
+app.delete("/memories/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const result = await db.query(
+      "DELETE FROM memories WHERE id = $1 RETURNING *",
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        ok: false,
+        error: "Memory not found",
+      });
+    }
+
+    return res.json({
+      ok: true,
+      deleted: result.rows[0],
+    });
+  } catch (err) {
+    console.error("DELETE /memories/:id error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to delete memory" });
   }
 });
 
