@@ -22,7 +22,7 @@ app.use(express.json());
 // Toggle verbose debug without code changes (set on Railway)
 const DEBUG_CHAT = String(process.env.DEBUG_CHAT || "").toLowerCase() === "true";
 
-// Log env presence (safe — does NOT print secrets)
+// Log env presence (safe – does NOT print secrets)
 console.log("BOOT env check:", {
   hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
   hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
@@ -141,7 +141,7 @@ function softenEarlySnap(reply, messages) {
   if (!Array.isArray(messages) || messages.length <= 1) {
     const r = String(reply || "").trim().toLowerCase();
     if (r === "what do you want?" || r === "focus. what do you want?") {
-      return "Yeah. I’m here.";
+      return "Yeah. I'm here.";
     }
   }
   return reply;
@@ -205,7 +205,7 @@ app.post("/auth", (req, res) => {
 // -----------------------------------
 app.post("/chat", async (req, res) => {
   try {
-    const { messages = [], mode = "SFW" } = req.body;
+    const { messages = [], mode = "SFW", threadSummary = null, recentMessages = [] } = req.body;
     const pace = paceFromReq(req.body);
 
     const userText = extractLastUserText(messages);
@@ -232,7 +232,7 @@ app.post("/chat", async (req, res) => {
       }
       return res.json({
         ok: true,
-        reply: "That’s not something I do. Let’s switch gears.",
+        reply: "That's not something I do. Let's switch gears.",
         blocked: true,
         reason: taboo,
       });
@@ -262,12 +262,33 @@ app.post("/chat", async (req, res) => {
         roles: summarizeRoles(messages),
         userTextLen: userText.length,
         systemPromptLen: systemPrompt.length,
+        hasSummary: !!threadSummary,
+        recentMessagesCount: recentMessages.length,
       });
+    }
+
+    // Build context with thread summary if available
+    let contextMessages = [];
+    
+    if (threadSummary) {
+      // Use summary + recent messages instead of full history
+      contextMessages = [
+        { role: "system", content: systemPrompt },
+        { role: "system", content: `Thread context: ${threadSummary}` },
+        ...recentMessages.map(m => ({ role: m.role, content: m.content })),
+        ...messages
+      ];
+    } else {
+      // Fallback to original behavior
+      contextMessages = [
+        { role: "system", content: systemPrompt },
+        ...messages
+      ];
     }
 
     const completion = await openai.chat.completions.create({
       model,
-      messages: [{ role: "system", content: systemPrompt }, ...messages],
+      messages: contextMessages,
       temperature,
     });
 
@@ -303,6 +324,73 @@ app.post("/chat", async (req, res) => {
 });
 
 // -----------------------------------
+// Summarize Endpoint (NEW)
+// -----------------------------------
+app.post("/summarize", async (req, res) => {
+  try {
+    const { messages = [], mode = "SFW" } = req.body;
+
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({
+        ok: false,
+        error: "Messages array required for summarization",
+      });
+    }
+
+    if (DEBUG_CHAT) {
+      console.log("[SUMMARIZE DEBUG] request", {
+        messageCount: messages.length,
+        mode,
+      });
+    }
+
+    // Build conversation text
+    const conversationText = messages
+      .map(m => {
+        const speaker = m.role === 'user' ? 'User' : 'Bromo';
+        return `${speaker}: ${m.content}`;
+      })
+      .join('\n\n');
+
+    // Summarization prompt
+    const systemPrompt = `You are summarizing a conversation between a user and Bromo (an AI companion).
+
+Create a concise 2-3 sentence summary that captures:
+- Main topics discussed
+- User's current emotional state or context
+- Key preferences or facts mentioned
+
+Keep it brief and factual. This will be used as context for future messages.`;
+
+    const userPrompt = `Summarize this conversation:\n\n${conversationText}`;
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt }
+      ],
+      temperature: 0.3,
+      max_tokens: 150,
+    });
+
+    const summary = completion?.choices?.[0]?.message?.content ?? "";
+
+    if (DEBUG_CHAT) {
+      console.log("[SUMMARIZE DEBUG] summary generated", {
+        summaryLength: summary.length,
+        tokensUsed: completion?.usage?.total_tokens || 0,
+      });
+    }
+
+    return res.json({ ok: true, summary });
+  } catch (err) {
+    console.error("SUMMARIZE ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Summarization failed" });
+  }
+});
+
+// -----------------------------------
 // Start Server (Railway expects process.env.PORT)
 // -----------------------------------
 const resolvedPort = Number(process.env.PORT);
@@ -314,5 +402,5 @@ app.listen(PORT, "0.0.0.0", () => {
 
 // Keepalive log (helps confirm it isn't being killed)
 setInterval(() => {
-  console.log("💓 still alive", { port: PORT, portEnv: process.env.PORT ?? null, ts: Date.now() });
+  console.log("💚 still alive", { port: PORT, portEnv: process.env.PORT ?? null, ts: Date.now() });
 }, 30000);
