@@ -118,13 +118,60 @@ function buildSystemPrompt({ mode, pace, memories = [] }) {
     basePrompt = BROMO_SFW_SYSTEM_PROMPT_V1;
   }
 
-  // Add memories if present
+  // PHASE 4: Natural memory injection (limit to 50 max, prioritize recent)
   if (memories && memories.length > 0) {
-    const memoryText = memories.map(m => `- ${m.value}`).join('\n');
-    basePrompt += `\n\nREMEMBERED FACTS:\n${memoryText}`;
+    // Limit to 50 memories max
+    const limitedMemories = memories.slice(0, 50);
+    
+    // Convert to natural, relational language
+    const memoryLines = limitedMemories.map(m => {
+      let value = m.value;
+      
+      // Transform "User X" → "He X" for natural tone
+      value = value.replace(/^User (likes?|dislikes?|is|enjoys?|prefers?)/i, (match, verb) => {
+        const lower = verb.toLowerCase();
+        if (lower.startsWith('like')) return "He's into";
+        if (lower.startsWith('dislike')) return "He can't stand";
+        if (lower === 'is') return "He's";
+        if (lower.startsWith('enjoy')) return "He enjoys";
+        if (lower.startsWith('prefer')) return "He prefers";
+        return match;
+      });
+      
+      // Handle boundaries naturally
+      value = value.replace(/^Never (.+)$/i, "Don't $1");
+      
+      return `- ${value}`;
+    }).join('\n');
+    
+    // PHASE 4: Natural header instead of "REMEMBERED FACTS"
+    basePrompt += `\n\nThings you've learned about him over time:\n${memoryLines}`;
   }
 
   return basePrompt;
+}
+
+// PHASE 4: Modular memory context builder (prep for Phase 5 semantic search)
+function buildMemoryContext(allMemories, mode) {
+  if (!allMemories || allMemories.length === 0) return [];
+  
+  // Filter by mode
+  const filtered = allMemories.filter(m => 
+    !m.mode || m.mode === mode || m.mode === null
+  );
+  
+  // PHASE 4: Prioritize high confidence, then by recency
+  const sorted = filtered.sort((a, b) => {
+    // High confidence first
+    if (a.confidence === 'high' && b.confidence !== 'high') return -1;
+    if (b.confidence === 'high' && a.confidence !== 'high') return 1;
+    
+    // Then by updated_at (most recent first)
+    return new Date(b.updated_at) - new Date(a.updated_at);
+  });
+  
+  // Hard limit: 50 memories max
+  return sorted.slice(0, 50);
 }
 
 function isNsfwPatchApplied({ mode, pace }) {
@@ -196,43 +243,62 @@ function violatesHardTaboo(userTextRaw) {
 // Add this section after the existing helper functions in index.js
 
 // -----------------------------------
-// Memory Detection (Phase 3)
+// Memory Detection (Phase 3 + Phase 4 Refinements)
 // -----------------------------------
 
 /**
- * Heuristic patterns for detecting memorable information
+ * PHASE 4: Emotional state stop-words (DO NOT capture as identity)
+ */
+const IDENTITY_STOPWORDS = [
+  'tired', 'exhausted', 'sleepy', 'awake', 'alert',
+  'horny', 'turned on', 'aroused', 'hard', 'wet',
+  'bored', 'excited', 'nervous', 'anxious', 'stressed',
+  'happy', 'sad', 'angry', 'mad', 'upset', 'frustrated',
+  'hungry', 'thirsty', 'full', 'stuffed',
+  'drunk', 'tipsy', 'high', 'sober',
+  'hot', 'cold', 'warm', 'cool',
+  'gay', 'straight', 'bi', 'queer', 'trans',
+  'single', 'taken', 'married', 'divorced',
+  'ready', 'done', 'finished', 'busy', 'free',
+  'sure', 'certain', 'unsure', 'confused',
+  'interested', 'curious', 'skeptical',
+];
+
+/**
+ * PHASE 4: Hardened patterns with better identity detection
  */
 const MEMORY_PATTERNS = {
   preferences: [
-    /\b(?:i|i'm|im)\s+(?:really\s+)?(?:into|love|like|enjoy|prefer)\s+(.+?)(?:\.|,|$)/i,
-    /\b(?:i|i'm|im)\s+(?:a\s+)?(?:big\s+)?fan\s+of\s+(.+?)(?:\.|,|$)/i,
+    /\b(?:i|i'm|im)\s+(?:really\s+)?(?:into|love|like|enjoy|prefer)\s+(.+?)(?:\.|,|!|$)/i,
+    /\b(?:i|i'm|im)\s+(?:a\s+)?(?:big\s+)?fan\s+of\s+(.+?)(?:\.|,|!|$)/i,
   ],
   dislikes: [
-    /\b(?:i|i'm|im)\s+not\s+(?:into|a fan of|interested in)\s+(.+?)(?:\.|,|$)/i,
-    /\b(?:i|i'm|im)\s+(?:really\s+)?(?:hate|dislike|can't stand)\s+(.+?)(?:\.|,|$)/i,
-    /\bdon't\s+(?:call me|use)\s+(.+?)(?:\.|,|$)/i,
+    /\b(?:i|i'm|im)\s+not\s+(?:into|a fan of|interested in)\s+(.+?)(?:\.|,|!|$)/i,
+    /\b(?:i|i'm|im)\s+(?:really\s+)?(?:hate|dislike|can't stand)\s+(.+?)(?:\.|,|!|$)/i,
+    /\bdon't\s+(?:call me|use)\s+(.+?)(?:\.|,|!|$)/i,
   ],
   identity: [
-    /\b(?:my\s+name\s+is|i'm|im|call me)\s+([A-Z][a-z]+)(?:\.|,|$)/i,
-    /\b(?:i|i'm|im)\s+a\s+(\w+)(?:\s+(?:by|as a)\s+)?(?:profession|trade)?(?:\.|,|$)/i,
+    // PHASE 4: Strict name patterns only
+    /\bmy\s+name\s+is\s+([A-Z][a-z]+)(?:\.|,|!|$)/i,
+    /\bcall\s+me\s+([A-Z][a-z]+)(?:\.|,|!|$)/i,
+    // PHASE 4: Profession patterns (explicit list, not emotional states)
+    /\b(?:i|i'm|im)\s+a\s+(developer|engineer|designer|teacher|student|doctor|nurse|artist|writer|musician|chef|bartender|manager|consultant|analyst|architect|accountant|lawyer|therapist|coach|trainer|mechanic|electrician|plumber|carpenter|contractor|realtor|salesperson|marketer|photographer|videographer|editor|producer|director|actor|model|athlete|veteran|military|pilot|driver|paramedic|firefighter|officer|detective|scientist|researcher|professor|instructor|tutor)(?:\s|\.|\,|!|$)/i,
   ],
   activities: [
-    /\b(?:i|i'm|im)\s+(?:currently\s+)?(?:working on|studying|learning)\s+(.+?)(?:\.|,|$)/i,
-    /\b(?:i|i'm|im)\s+(?:trying to|planning to)\s+(.+?)(?:\.|,|$)/i,
+    /\b(?:i|i'm|im)\s+(?:currently\s+)?(?:working on|building|creating|studying|learning|practicing)\s+(.+?)(?:\.|,|!|$)/i,
+    /\b(?:i|i'm|im)\s+(?:trying to|planning to|hoping to)\s+(.+?)(?:\.|,|!|$)/i,
   ],
   boundaries: [
-    /\bnever\s+(?:call me|say|use)\s+(.+?)(?:\.|,|$)/i,
-    /\bdon't\s+(?:ever\s+)?(?:mention|bring up|talk about)\s+(.+?)(?:\.|,|$)/i,
+    /\bnever\s+(?:call me|say|use|mention|bring up)\s+(.+?)(?:\.|,|!|$)/i,
+    /\bdon't\s+(?:ever\s+)?(?:mention|bring up|talk about|ask about)\s+(.+?)(?:\.|,|!|$)/i,
   ],
 };
 
 /**
- * Detect potential memories from user text using heuristics
- * Returns array of detected facts with suggested key/value pairs
+ * PHASE 4: Enhanced detection with stopword filtering
  */
 function detectMemoriesHeuristic(userText) {
   const detected = [];
-  const text = userText.toLowerCase();
 
   // Check each pattern category
   for (const [category, patterns] of Object.entries(MEMORY_PATTERNS)) {
@@ -243,6 +309,17 @@ function detectMemoriesHeuristic(userText) {
         
         // Skip very short matches (likely false positives)
         if (value.length < 3) continue;
+        
+        // PHASE 4: For identity category, check stopwords
+        if (category === 'identity') {
+          const lowerValue = value.toLowerCase();
+          if (IDENTITY_STOPWORDS.some(word => lowerValue === word || lowerValue.includes(word))) {
+            if (DEBUG_CHAT) {
+              console.log(`[DETECT] Skipping identity stopword: "${value}"`);
+            }
+            continue;
+          }
+        }
         
         // Generate a key based on category and content
         const key = `${category}_${value.toLowerCase().replace(/\s+/g, '_').substring(0, 30)}`;
@@ -262,20 +339,20 @@ function detectMemoriesHeuristic(userText) {
 }
 
 /**
- * Format detected value into a proper memory statement
+ * PHASE 4: Format detected value into natural, relational statement
  */
 function formatMemoryValue(category, rawValue) {
   switch (category) {
     case 'preferences':
-      return `User likes ${rawValue}`;
+      return `He's into ${rawValue}`;
     case 'dislikes':
-      return `User dislikes ${rawValue}`;
+      return `He can't stand ${rawValue}`;
     case 'identity':
-      return `User is ${rawValue}`;
+      return `He's ${rawValue}`;
     case 'activities':
-      return `User is ${rawValue}`;
+      return `He's ${rawValue}`;
     case 'boundaries':
-      return `Never ${rawValue}`;
+      return `Don't ${rawValue}`;
     default:
       return rawValue;
   }
@@ -635,9 +712,60 @@ app.delete("/memories/:id", async (req, res) => {
 });
 
 // -----------------------------------
-// Memory Detection Endpoint (Phase 3)
-// Add this after the existing /memories endpoints
+// Memory Detection Endpoint (Phase 3 + Phase 4 Refinements)
 // -----------------------------------
+
+/**
+ * PHASE 4: Determine if detection should run based on message context
+ */
+function shouldTriggerDetection(messages) {
+  if (!messages || messages.length === 0) return false;
+  
+  // Get last few user messages
+  const recentUserMessages = messages
+    .filter(m => m.role === 'user')
+    .slice(-5)
+    .map(m => m.content);
+  
+  if (recentUserMessages.length === 0) return false;
+  
+  // PHASE 4: Skip detection during rapid-fire short replies
+  const avgLength = recentUserMessages.reduce((sum, msg) => sum + msg.split(' ').length, 0) / recentUserMessages.length;
+  if (avgLength < 5) {
+    if (DEBUG_CHAT) {
+      console.log('[DETECT] Skipping: Average message length too short (rapid-fire)');
+    }
+    return false;
+  }
+  
+  // PHASE 4: Skip during high escalation NSFW sequences
+  const lastMessage = recentUserMessages[recentUserMessages.length - 1].toLowerCase();
+  const nsfwEscalationKeywords = ['fuck', 'cum', 'dick', 'cock', 'pussy', 'ass', 'tits', 'mmm', 'moan', 'harder', 'deeper'];
+  const hasMultipleNsfwKeywords = nsfwEscalationKeywords.filter(kw => lastMessage.includes(kw)).length >= 2;
+  
+  if (hasMultipleNsfwKeywords) {
+    if (DEBUG_CHAT) {
+      console.log('[DETECT] Skipping: High NSFW escalation detected');
+    }
+    return false;
+  }
+  
+  // PHASE 4: Only trigger if high-value patterns likely present
+  const hasIdentityLanguage = /\b(?:my name is|call me|i'm a|i work as)\b/i.test(lastMessage);
+  const hasBoundaryLanguage = /\b(?:never|don't ever|don't mention|boundaries?)\b/i.test(lastMessage);
+  const hasPreferenceLanguage = /\b(?:i love|i like|i enjoy|i prefer|i'm into|i hate|i dislike)\b/i.test(lastMessage);
+  
+  const hasHighValuePattern = hasIdentityLanguage || hasBoundaryLanguage || hasPreferenceLanguage;
+  
+  if (!hasHighValuePattern) {
+    if (DEBUG_CHAT) {
+      console.log('[DETECT] Skipping: No high-value patterns detected');
+    }
+    return false;
+  }
+  
+  return true;
+}
 
 // POST /detect-memory - Analyze recent messages for memorable facts
 app.post("/detect-memory", async (req, res) => {
@@ -648,6 +776,19 @@ app.post("/detect-memory", async (req, res) => {
       return res.status(400).json({
         ok: false,
         error: "Messages array required",
+      });
+    }
+
+    // PHASE 4: Check if detection should run
+    if (!shouldTriggerDetection(messages)) {
+      if (DEBUG_CHAT) {
+        console.log("[DETECT DEBUG] Detection skipped based on context");
+      }
+      return res.json({
+        ok: true,
+        detected: [],
+        count: 0,
+        skipped: true,
       });
     }
 
