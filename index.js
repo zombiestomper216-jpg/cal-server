@@ -6,8 +6,8 @@ import OpenAI from "openai";
 import pg from "pg";
 
 import {
-  BROMO_SFW_SYSTEM_PROMPT_V1,
-  BROMO_NSFW_SYSTEM_PROMPT_V1,
+  BROMO_SFW_SYSTEM_PROMPT_V2,
+  BROMO_NSFW_SYSTEM_PROMPT_V2,
   NSFW_BEHAVIOR_PATCH,
 } from "./prompts.js";
 
@@ -97,53 +97,69 @@ app.get("/health", async (_req, res) => {
 // -----------------------------------
 // Helpers
 // -----------------------------------
+
+// ✅ FIX: map numeric driftSpeed (1/5/9) OR string pace labels into server pace states
 function paceFromReq(reqBody) {
-  const drift = String(reqBody?.prefs?.driftSpeed ?? reqBody?.pace ?? "NORMAL").toUpperCase();
+  const raw = reqBody?.prefs?.driftSpeed ?? reqBody?.pace ?? "NORMAL";
+
+  // Handle numeric drift values (1/5/9) and numeric strings ("1"/"5"/"9")
+  const n = typeof raw === "number" ? raw : Number(String(raw).trim());
+  if (Number.isFinite(n)) {
+    if (n >= 9) return "AFTER_DARK";
+    if (n >= 5) return "TURN_IT_UP";
+    return "SLOW_BURN";
+  }
+
+  const drift = String(raw || "NORMAL").toUpperCase();
+
+  // Handle string paces (existing behavior)
   if (drift === "AFTER_DARK") return "AFTER_DARK";
-  if (drift === "FAST") return "TURN_IT_UP";
-  if (drift === "SLOW") return "SLOW_BURN";
+  if (drift === "FAST" || drift === "TURN_IT_UP") return "TURN_IT_UP";
+  if (drift === "SLOW" || drift === "SLOW_BURN" || drift === "JUST_RIGHT") return "SLOW_BURN";
+
   return "NORMAL";
 }
 
 function buildSystemPrompt({ mode, pace, memories = [] }) {
   let basePrompt = "";
-  
+
   if (mode === "NSFW") {
     if (pace === "TURN_IT_UP" || pace === "AFTER_DARK") {
-      basePrompt = `${BROMO_NSFW_SYSTEM_PROMPT_V1}\n\n${NSFW_BEHAVIOR_PATCH}`;
+      basePrompt = `${BROMO_NSFW_SYSTEM_PROMPT_V2}\n\n${NSFW_BEHAVIOR_PATCH}`;
     } else {
-      basePrompt = BROMO_NSFW_SYSTEM_PROMPT_V1;
+      basePrompt = BROMO_NSFW_SYSTEM_PROMPT_V2;
     }
   } else {
-    basePrompt = BROMO_SFW_SYSTEM_PROMPT_V1;
-  }
+basePrompt = BROMO_SFW_SYSTEM_PROMPT_V2;  }
 
   // PHASE 4: Natural memory injection (limit to 50 max, prioritize recent)
   if (memories && memories.length > 0) {
     // Limit to 50 memories max
     const limitedMemories = memories.slice(0, 50);
-    
+
     // Convert to natural, relational language
-    const memoryLines = limitedMemories.map(m => {
-      let value = m.value;
-      
-      // Transform "User X" → "He X" for natural tone
-      value = value.replace(/^User (likes?|dislikes?|is|enjoys?|prefers?)/i, (match, verb) => {
-        const lower = verb.toLowerCase();
-        if (lower.startsWith('like')) return "He's into";
-        if (lower.startsWith('dislike')) return "He can't stand";
-        if (lower === 'is') return "He's";
-        if (lower.startsWith('enjoy')) return "He enjoys";
-        if (lower.startsWith('prefer')) return "He prefers";
-        return match;
-      });
-      
-      // Handle boundaries naturally
-      value = value.replace(/^Never (.+)$/i, "Don't $1");
-      
-      return `- ${value}`;
-    }).join('\n');
-    
+    const memoryLines = limitedMemories
+      .map((m) => {
+        let value = m.value;
+
+        // Transform "User X" → "He X" for natural tone
+        value = value.replace(/^User (likes?|dislikes?|is|enjoys?|prefers?)/i, (match, verb) => {
+          const lower = verb.toLowerCase();
+          if (lower.startsWith("like")) return "He's into";
+          if (lower.startsWith("dislike")) return "He can't stand";
+          if (lower === "is") return "He's";
+          if (lower.startsWith("enjoy")) return "He enjoys";
+          if (lower.startsWith("prefer")) return "He prefers";
+          return match;
+        });
+
+        // Handle boundaries naturally
+        value = value.replace(/^Never (.+)$/i, "Don't $1");
+
+        return `- ${value}`;
+      })
+      .join("\n");
+
     // PHASE 4: Natural header instead of "REMEMBERED FACTS"
     basePrompt += `\n\nThings you've learned about him over time:\n${memoryLines}`;
   }
@@ -154,22 +170,20 @@ function buildSystemPrompt({ mode, pace, memories = [] }) {
 // PHASE 4: Modular memory context builder (prep for Phase 5 semantic search)
 function buildMemoryContext(allMemories, mode) {
   if (!allMemories || allMemories.length === 0) return [];
-  
+
   // Filter by mode
-  const filtered = allMemories.filter(m => 
-    !m.mode || m.mode === mode || m.mode === null
-  );
-  
+  const filtered = allMemories.filter((m) => !m.mode || m.mode === mode || m.mode === null);
+
   // PHASE 4: Prioritize high confidence, then by recency
   const sorted = filtered.sort((a, b) => {
     // High confidence first
-    if (a.confidence === 'high' && b.confidence !== 'high') return -1;
-    if (b.confidence === 'high' && a.confidence !== 'high') return 1;
-    
+    if (a.confidence === "high" && b.confidence !== "high") return -1;
+    if (b.confidence === "high" && a.confidence !== "high") return 1;
+
     // Then by updated_at (most recent first)
     return new Date(b.updated_at) - new Date(a.updated_at);
   });
-  
+
   // Hard limit: 50 memories max
   return sorted.slice(0, 50);
 }
@@ -239,8 +253,91 @@ function violatesHardTaboo(userTextRaw) {
   return null;
 }
 
-// Memory Detection Patterns and Logic
-// Add this section after the existing helper functions in index.js
+// -----------------------------------
+// Auth (Tester Codes - Phase 9)
+// -----------------------------------
+//
+// Supports BOTH:
+// 1) legacy username/password (for your own admin/dev usage)
+// 2) testerCode login (recommended for Phase 9)
+//
+// ENV:
+// - TESTER_CODES: comma-separated allowlist
+// - TESTER_ADULT_CODES: optional comma-separated subset allowed NSFW/adultVerified=true
+// - DEV_AUTH_USER / DEV_AUTH_PASS: optional legacy fallback (or keep existing AUTH_USER/AUTH_PASS)
+
+function csvEnv(name) {
+  const raw = String(process.env[name] || "").trim();
+  if (!raw) return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+const TESTER_CODES = new Set(csvEnv("TESTER_CODES").map((c) => c.toUpperCase()));
+const TESTER_ADULT_CODES = new Set(csvEnv("TESTER_ADULT_CODES").map((c) => c.toUpperCase()));
+
+function makeSessionToken(prefix) {
+  // NOTE: This is a lightweight session token for the beta.
+  // There is currently no auth middleware enforcing it server-side.
+  return `${prefix}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}`;
+}
+
+app.post("/auth", (req, res) => {
+  const body = req.body || {};
+
+  // New path: tester code
+  const codeRaw = body.code || (body.username && !body.password ? body.username : null);
+  const code = String(codeRaw || "").trim().toUpperCase();
+
+  if (code) {
+    if (!TESTER_CODES.size) {
+      return res.status(500).json({ ok: false, error: "TESTER_CODES not configured on server." });
+    }
+
+    if (!TESTER_CODES.has(code)) {
+      return res.status(401).json({ ok: false, error: "Invalid tester code." });
+    }
+
+    const adultVerified = TESTER_ADULT_CODES.size ? TESTER_ADULT_CODES.has(code) : false;
+
+    return res.json({
+      ok: true,
+      token: makeSessionToken(`tester:${code}`),
+      testerCode: code,
+      adultVerified,
+    });
+  }
+
+  // Legacy path: username/password (optional)
+  const { username, password } = body;
+
+  if (!username || !password) {
+    return res.status(400).json({
+      ok: false,
+      error: "Missing credentials (provide tester code or username/password).",
+    });
+  }
+
+  const devUser = process.env.DEV_AUTH_USER || process.env.AUTH_USER || "";
+  const devPass = process.env.DEV_AUTH_PASS || process.env.AUTH_PASS || "";
+
+  if (devUser && devPass) {
+    if (String(username).trim() !== devUser || String(password) !== devPass) {
+      return res.status(401).json({ ok: false, error: "Invalid credentials." });
+    }
+  } else {
+    // If no dev creds are configured, keep the old permissive behavior for local dev
+    if (DEBUG_CHAT) console.log("[AUTH] No DEV_AUTH_USER/DEV_AUTH_PASS set; allowing legacy login.");
+  }
+
+  return res.json({
+    ok: true,
+    token: makeSessionToken("dev"),
+    adultVerified: true,
+  });
+});
 
 // -----------------------------------
 // Memory Detection (Phase 3 + Phase 4 Refinements)
@@ -250,18 +347,60 @@ function violatesHardTaboo(userTextRaw) {
  * PHASE 4: Emotional state stop-words (DO NOT capture as identity)
  */
 const IDENTITY_STOPWORDS = [
-  'tired', 'exhausted', 'sleepy', 'awake', 'alert',
-  'horny', 'turned on', 'aroused', 'hard', 'wet',
-  'bored', 'excited', 'nervous', 'anxious', 'stressed',
-  'happy', 'sad', 'angry', 'mad', 'upset', 'frustrated',
-  'hungry', 'thirsty', 'full', 'stuffed',
-  'drunk', 'tipsy', 'high', 'sober',
-  'hot', 'cold', 'warm', 'cool',
-  'gay', 'straight', 'bi', 'queer', 'trans',
-  'single', 'taken', 'married', 'divorced',
-  'ready', 'done', 'finished', 'busy', 'free',
-  'sure', 'certain', 'unsure', 'confused',
-  'interested', 'curious', 'skeptical',
+  "tired",
+  "exhausted",
+  "sleepy",
+  "awake",
+  "alert",
+  "horny",
+  "turned on",
+  "aroused",
+  "hard",
+  "wet",
+  "bored",
+  "excited",
+  "nervous",
+  "anxious",
+  "stressed",
+  "happy",
+  "sad",
+  "angry",
+  "mad",
+  "upset",
+  "frustrated",
+  "hungry",
+  "thirsty",
+  "full",
+  "stuffed",
+  "drunk",
+  "tipsy",
+  "high",
+  "sober",
+  "hot",
+  "cold",
+  "warm",
+  "cool",
+  "gay",
+  "straight",
+  "bi",
+  "queer",
+  "trans",
+  "single",
+  "taken",
+  "married",
+  "divorced",
+  "ready",
+  "done",
+  "finished",
+  "busy",
+  "free",
+  "sure",
+  "certain",
+  "unsure",
+  "confused",
+  "interested",
+  "curious",
+  "skeptical",
 ];
 
 /**
@@ -306,29 +445,29 @@ function detectMemoriesHeuristic(userText) {
       const match = userText.match(pattern);
       if (match && match[1]) {
         const value = match[1].trim();
-        
+
         // Skip very short matches (likely false positives)
         if (value.length < 3) continue;
-        
+
         // PHASE 4: For identity category, check stopwords
-        if (category === 'identity') {
+        if (category === "identity") {
           const lowerValue = value.toLowerCase();
-          if (IDENTITY_STOPWORDS.some(word => lowerValue === word || lowerValue.includes(word))) {
+          if (IDENTITY_STOPWORDS.some((word) => lowerValue === word || lowerValue.includes(word))) {
             if (DEBUG_CHAT) {
               console.log(`[DETECT] Skipping identity stopword: "${value}"`);
             }
             continue;
           }
         }
-        
+
         // Generate a key based on category and content
-        const key = `${category}_${value.toLowerCase().replace(/\s+/g, '_').substring(0, 30)}`;
-        
+        const key = `${category}_${value.toLowerCase().replace(/\s+/g, "_").substring(0, 30)}`;
+
         detected.push({
           category,
           key,
           value: formatMemoryValue(category, value),
-          confidence: 'low', // User-confirmed memories upgrade to 'high'
+          confidence: "low", // User-confirmed memories upgrade to 'high'
           matchedPattern: pattern.source,
         });
       }
@@ -343,54 +482,28 @@ function detectMemoriesHeuristic(userText) {
  */
 function formatMemoryValue(category, rawValue) {
   switch (category) {
-    case 'preferences':
+    case "preferences":
       return `He's into ${rawValue}`;
-    case 'dislikes':
+    case "dislikes":
       return `He can't stand ${rawValue}`;
-    case 'identity':
+    case "identity":
       return `He's ${rawValue}`;
-    case 'activities':
+    case "activities":
       return `He's ${rawValue}`;
-    case 'boundaries':
+    case "boundaries":
       return `Don't ${rawValue}`;
     default:
       return rawValue;
   }
 }
 
-
-// -----------------------------------
-// Auth (temporary / dev)
-// -----------------------------------
-app.post("/auth", (req, res) => {
-  const { username, password } = req.body || {};
-
-  if (!username || !password) {
-    return res.status(400).json({
-      ok: false,
-      error: "Missing credentials",
-    });
-  }
-
-  return res.json({
-    ok: true,
-    token: "dev-token",
-    adultVerified: true,
-  });
-});
-
 // -----------------------------------
 // Chat Endpoint
 // -----------------------------------
 app.post("/chat", async (req, res) => {
   try {
-    const { 
-      messages = [], 
-      mode = "SFW", 
-      threadSummary = null, 
-      recentMessages = [],
-      memories = []
-    } = req.body;
+    const { messages = [], mode = "SFW", threadSummary = null, recentMessages = [], memories = [] } =
+      req.body;
     const pace = paceFromReq(req.body);
 
     const userText = extractLastUserText(messages);
@@ -431,8 +544,8 @@ app.post("/chat", async (req, res) => {
         ? pace === "AFTER_DARK"
           ? 0.95
           : pace === "TURN_IT_UP"
-            ? 0.9
-            : 0.85
+          ? 0.9
+          : 0.85
         : 0.7;
 
     const model = "gpt-4o-mini";
@@ -455,21 +568,18 @@ app.post("/chat", async (req, res) => {
 
     // Build context with thread summary if available
     let contextMessages = [];
-    
+
     if (threadSummary) {
       // Use summary + recent messages instead of full history
       contextMessages = [
         { role: "system", content: systemPrompt },
         { role: "system", content: `Thread context: ${threadSummary}` },
-        ...recentMessages.map(m => ({ role: m.role, content: m.content })),
-        ...messages
+        ...recentMessages.map((m) => ({ role: m.role, content: m.content })),
+        ...messages,
       ];
     } else {
       // Fallback to original behavior
-      contextMessages = [
-        { role: "system", content: systemPrompt },
-        ...messages
-      ];
+      contextMessages = [{ role: "system", content: systemPrompt }, ...messages];
     }
 
     const completion = await openai.chat.completions.create({
@@ -532,14 +642,14 @@ app.post("/summarize", async (req, res) => {
 
     // Build conversation text
     const conversationText = messages
-      .map(m => {
-        const speaker = m.role === 'user' ? 'User' : 'Bromo';
+      .map((m) => {
+        const speaker = m.role === "user" ? "User" : "Bromo";
         return `${speaker}: ${m.content}`;
       })
-      .join('\n\n');
+      .join("\n\n");
 
     // Summarization prompt
-    const systemPrompt = `You are summarizing a conversation between a user and Bromo (an AI companion).
+    const systemPrompt = `You are summarizing a conversation between the user and Bromo (an AI companion).
 
 Create a concise 2-3 sentence summary that captures:
 - Main topics discussed
@@ -554,7 +664,7 @@ Keep it brief and factual. This will be used as context for future messages.`;
       model: "gpt-4o-mini",
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
+        { role: "user", content: userPrompt },
       ],
       temperature: 0.3,
       max_tokens: 150,
@@ -630,7 +740,7 @@ app.post("/memories", async (req, res) => {
     const result = await db.query(
       `INSERT INTO memories (device_id, key, value, mode, confidence)
        VALUES ($1, $2, $3, $4, 'high')
-       ON CONFLICT (device_id, key) 
+       ON CONFLICT (device_id, key)
        DO UPDATE SET value = $3, mode = $4, updated_at = NOW()
        RETURNING *`,
       [device_id, key, value, mode]
@@ -660,7 +770,7 @@ app.put("/memories/:id", async (req, res) => {
     }
 
     const result = await db.query(
-      `UPDATE memories 
+      `UPDATE memories
        SET value = $1, mode = $2, updated_at = NOW()
        WHERE id = $3
        RETURNING *`,
@@ -689,10 +799,7 @@ app.delete("/memories/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    const result = await db.query(
-      "DELETE FROM memories WHERE id = $1 RETURNING *",
-      [id]
-    );
+    const result = await db.query("DELETE FROM memories WHERE id = $1 RETURNING *", [id]);
 
     if (result.rows.length === 0) {
       return res.status(404).json({
@@ -720,50 +827,67 @@ app.delete("/memories/:id", async (req, res) => {
  */
 function shouldTriggerDetection(messages) {
   if (!messages || messages.length === 0) return false;
-  
+
   // Get last few user messages
   const recentUserMessages = messages
-    .filter(m => m.role === 'user')
+    .filter((m) => m.role === "user")
     .slice(-5)
-    .map(m => m.content);
-  
+    .map((m) => m.content);
+
   if (recentUserMessages.length === 0) return false;
-  
+
   // PHASE 4: Skip detection during rapid-fire short replies
-  const avgLength = recentUserMessages.reduce((sum, msg) => sum + msg.split(' ').length, 0) / recentUserMessages.length;
+  const avgLength =
+    recentUserMessages.reduce((sum, msg) => sum + msg.split(" ").length, 0) /
+    recentUserMessages.length;
   if (avgLength < 5) {
     if (DEBUG_CHAT) {
-      console.log('[DETECT] Skipping: Average message length too short (rapid-fire)');
+      console.log("[DETECT] Skipping: Average message length too short (rapid-fire)");
     }
     return false;
   }
-  
+
   // PHASE 4: Skip during high escalation NSFW sequences
   const lastMessage = recentUserMessages[recentUserMessages.length - 1].toLowerCase();
-  const nsfwEscalationKeywords = ['fuck', 'cum', 'dick', 'cock', 'pussy', 'ass', 'tits', 'mmm', 'moan', 'harder', 'deeper'];
-  const hasMultipleNsfwKeywords = nsfwEscalationKeywords.filter(kw => lastMessage.includes(kw)).length >= 2;
-  
+  const nsfwEscalationKeywords = [
+    "fuck",
+    "cum",
+    "dick",
+    "cock",
+    "pussy",
+    "ass",
+    "tits",
+    "mmm",
+    "moan",
+    "harder",
+    "deeper",
+  ];
+  const hasMultipleNsfwKeywords =
+    nsfwEscalationKeywords.filter((kw) => lastMessage.includes(kw)).length >= 2;
+
   if (hasMultipleNsfwKeywords) {
     if (DEBUG_CHAT) {
-      console.log('[DETECT] Skipping: High NSFW escalation detected');
+      console.log("[DETECT] Skipping: High NSFW escalation detected");
     }
     return false;
   }
-  
+
   // PHASE 4: Only trigger if high-value patterns likely present
   const hasIdentityLanguage = /\b(?:my name is|call me|i'm a|i work as)\b/i.test(lastMessage);
   const hasBoundaryLanguage = /\b(?:never|don't ever|don't mention|boundaries?)\b/i.test(lastMessage);
-  const hasPreferenceLanguage = /\b(?:i love|i like|i enjoy|i prefer|i'm into|i hate|i dislike)\b/i.test(lastMessage);
-  
+  const hasPreferenceLanguage = /\b(?:i love|i like|i enjoy|i prefer|i'm into|i hate|i dislike)\b/i.test(
+    lastMessage
+  );
+
   const hasHighValuePattern = hasIdentityLanguage || hasBoundaryLanguage || hasPreferenceLanguage;
-  
+
   if (!hasHighValuePattern) {
     if (DEBUG_CHAT) {
-      console.log('[DETECT] Skipping: No high-value patterns detected');
+      console.log("[DETECT] Skipping: No high-value patterns detected");
     }
     return false;
   }
-  
+
   return true;
 }
 
@@ -798,9 +922,9 @@ app.post("/detect-memory", async (req, res) => {
 
     // Combine recent user messages for analysis
     const userMessages = messages
-      .filter(m => m.role === 'user')
-      .map(m => m.content)
-      .join(' ');
+      .filter((m) => m.role === "user")
+      .map((m) => m.content)
+      .join(" ");
 
     // Use heuristic detection
     const detected = detectMemoriesHeuristic(userMessages);
@@ -820,7 +944,6 @@ app.post("/detect-memory", async (req, res) => {
     return res.status(500).json({ ok: false, error: "Detection failed" });
   }
 });
-
 
 // -----------------------------------
 // Start Server (Railway expects process.env.PORT)
