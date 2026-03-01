@@ -210,6 +210,9 @@ function summarizeRoles(messages) {
 }
 
 // Minimal post-gen guard to prevent curt default opener on early turns
+// Post-generation safety net for a known bad opener on the very first turn.
+// NOTE: This is a fallback only. Persona-level behavior should be defined in prompts.js,
+// not here. If Bromo's opener problem is resolved in the prompt, this can be removed.
 function softenEarlySnap(reply, messages) {
   if (!Array.isArray(messages) || messages.length <= 1) {
     const r = String(reply || "").trim().toLowerCase();
@@ -232,11 +235,12 @@ function violatesHardTaboo(userTextRaw) {
   const minorPatterns = [
     /\bminor\b/i,
     /\bunder ?age\b/i,
-    /\bteen\b/i,
-    /\bchild\b/i,
-    /\bkid\b/i,
-    /\blittle girl\b/i,
-    /\blittle boy\b/i,
+    // "teen" and "kid" scoped to sexual context to avoid false positives
+    // ("my teen years", "I'm a kid at heart", etc.)
+    /\bteen\s+(boy|girl|guy|bro|sis|male|female)\b/i,
+    /\b(teen|child|kid)\s+(sex|porn|nude|naked|touching|fondl)\b/i,
+    /\b(sex|fuck|touch|naked|nude)\s+(a\s+)?(teen|child|kid|minor)\b/i,
+    /\blittle (girl|boy)\b/i,
     /\bschoolgirl\b/i,
     /\bschoolboy\b/i,
   ];
@@ -244,7 +248,9 @@ function violatesHardTaboo(userTextRaw) {
   const nonConPatterns = [
     /\bno means yes\b/i,
     /\bignore (my|the) no\b/i,
-    /\b(force|forced)\b/i,
+    // "force/forced" scoped to remove false positives ("forced perspective", "forced to watch")
+    /\bforce\s+(me|him|her|them|you|us|sex|it)\b/i,
+    /\bforced\s+(sex|intercourse|himself|herself|themselves|me|him|her|them)\b/i,
   ];
 
   if (incestPatterns.some((r) => r.test(t))) return "incest_stepfamily";
@@ -279,9 +285,97 @@ const TESTER_CODES = new Set(csvEnv("TESTER_CODES").map((c) => c.toUpperCase()))
 const TESTER_ADULT_CODES = new Set(csvEnv("TESTER_ADULT_CODES").map((c) => c.toUpperCase()));
 
 function makeSessionToken(prefix) {
-  // NOTE: This is a lightweight session token for the beta.
-  // There is currently no auth middleware enforcing it server-side.
   return `${prefix}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}`;
+}
+
+// -----------------------------------
+// Token Verification Helpers
+// -----------------------------------
+
+/**
+ * Extracts the tester code from a Bearer token.
+ * Token format: "tester:CODE.timestamp.random" or "dev.timestamp.random"
+ * Returns the code in uppercase, or null if not a tester token.
+ */
+function extractTokenCode(req) {
+  const authHeader = String(req.headers?.authorization || "").trim();
+  if (!authHeader.toLowerCase().startsWith("bearer ")) return null;
+
+  const token = authHeader.slice(7).trim();
+  // tester tokens are prefixed "tester:CODE."
+  const match = token.match(/^tester:([A-Z0-9_-]+)\./i);
+  if (!match) return null;
+
+  return match[1].toUpperCase();
+}
+
+/**
+ * Returns true if the request carries a token belonging to TESTER_ADULT_CODES.
+ * Falls back to false for dev tokens or missing/malformed tokens.
+ */
+function isAdultVerifiedToken(req) {
+  const code = extractTokenCode(req);
+  if (!code) return false;
+  return TESTER_ADULT_CODES.has(code);
+}
+
+// -----------------------------------
+// Auth Middleware
+// -----------------------------------
+
+/**
+ * requireAuth — verifies a Bearer token on protected endpoints.
+ *
+ * Valid tokens:
+ *   1) tester:CODE.* where CODE is in TESTER_CODES
+ *   2) dev.* where DEV_AUTH_USER / DEV_AUTH_PASS are configured in env
+ *      (allows local development without tester codes)
+ *
+ * /auth, /health, and / are intentionally excluded.
+ */
+function requireAuth(req, res, next) {
+  const authHeader = String(req.headers?.authorization || "").trim();
+
+  if (!authHeader.toLowerCase().startsWith("bearer ")) {
+    if (DEBUG_CHAT) console.log("[AUTH] Rejected: missing Bearer token", req.path);
+    return res.status(401).json({ ok: false, error: "Authentication required." });
+  }
+
+  const token = authHeader.slice(7).trim();
+
+  // --- Tester code path ---
+  const testerMatch = token.match(/^tester:([A-Z0-9_-]+)\./i);
+  if (testerMatch) {
+    const code = testerMatch[1].toUpperCase();
+    if (!TESTER_CODES.size) {
+      // Server misconfiguration — TESTER_CODES env not set
+      if (DEBUG_CHAT) console.log("[AUTH] Rejected: TESTER_CODES not configured");
+      return res.status(500).json({ ok: false, error: "Server auth not configured." });
+    }
+    if (!TESTER_CODES.has(code)) {
+      if (DEBUG_CHAT) console.log("[AUTH] Rejected: unknown tester code", code);
+      return res.status(401).json({ ok: false, error: "Invalid or expired token." });
+    }
+    return next();
+  }
+
+  // --- Dev token path ---
+  const devMatch = token.match(/^dev\./i);
+  if (devMatch) {
+    const devUser = process.env.DEV_AUTH_USER || process.env.AUTH_USER || "";
+    const devPass = process.env.DEV_AUTH_PASS || process.env.AUTH_PASS || "";
+    if (devUser && devPass) {
+      // Dev creds configured — dev tokens are valid
+      return next();
+    }
+    // No dev creds configured — reject dev tokens in production
+    if (DEBUG_CHAT) console.log("[AUTH] Rejected: dev token but no DEV_AUTH_USER/PASS set");
+    return res.status(401).json({ ok: false, error: "Invalid or expired token." });
+  }
+
+  // --- Unrecognized token format ---
+  if (DEBUG_CHAT) console.log("[AUTH] Rejected: unrecognized token format", req.path);
+  return res.status(401).json({ ok: false, error: "Invalid or expired token." });
 }
 
 app.post("/auth", (req, res) => {
@@ -328,14 +422,23 @@ app.post("/auth", (req, res) => {
       return res.status(401).json({ ok: false, error: "Invalid credentials." });
     }
   } else {
-    // If no dev creds are configured, keep the old permissive behavior for local dev
-    if (DEBUG_CHAT) console.log("[AUTH] No DEV_AUTH_USER/DEV_AUTH_PASS set; allowing legacy login.");
+    // No dev creds configured — reject rather than silently allow.
+    // This prevents misconfigured production servers from accepting any credentials.
+    if (DEBUG_CHAT) console.log("[AUTH] Rejected: DEV_AUTH_USER/DEV_AUTH_PASS not configured.");
+    return res.status(500).json({
+      ok: false,
+      error: "Legacy auth is not configured on this server. Use a tester code.",
+    });
   }
+
+  // adultVerified on dev accounts is opt-in via DEV_ADULT_VERIFIED=true env var.
+  // Defaults to false so dev tokens don't silently gain NSFW access.
+  const devAdultVerified = String(process.env.DEV_ADULT_VERIFIED || "").toLowerCase() === "true";
 
   return res.json({
     ok: true,
     token: makeSessionToken("dev"),
-    adultVerified: true,
+    adultVerified: devAdultVerified,
   });
 });
 
@@ -500,7 +603,7 @@ function formatMemoryValue(category, rawValue) {
 // -----------------------------------
 // Chat Endpoint
 // -----------------------------------
-app.post("/chat", async (req, res) => {
+app.post("/chat", requireAuth, async (req, res) => {
   try {
     const { messages = [], mode = "SFW", threadSummary = null, recentMessages = [], memories = [] } =
       req.body;
@@ -536,7 +639,32 @@ app.post("/chat", async (req, res) => {
       });
     }
 
-    const systemPrompt = buildSystemPrompt({ mode, pace, memories });
+    // -----------------------------------
+    // NSFW Adult Verification Gate
+    // -----------------------------------
+    // NSFW mode requires a token that belongs to TESTER_ADULT_CODES.
+    // The client-side adultVerified flag is intentionally NOT trusted here —
+    // only the server-side token check is authoritative.
+    if (mode === "NSFW" && !isAdultVerifiedToken(req)) {
+      if (DEBUG_CHAT) {
+        console.log("[CHAT DEBUG] blocked: nsfw_not_verified", {
+          hasToken: !!req.headers?.authorization,
+          code: extractTokenCode(req),
+        });
+      }
+      return res.json({
+        ok: true,
+        reply: "NSFW mode isn't available on your account. You can switch to SFW in Settings.",
+        blocked: true,
+        reason: "adult_verification_required",
+      });
+    }
+
+    // Filter and prioritize memories through buildMemoryContext before injecting
+    // into the prompt. Without this, all client-provided memories are passed raw —
+    // including wrong-mode memories and low-confidence entries.
+    const filteredMemories = buildMemoryContext(memories, mode);
+    const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories });
     const patchApplied = isNsfwPatchApplied({ mode, pace });
 
     const temperature =
@@ -548,7 +676,7 @@ app.post("/chat", async (req, res) => {
           : 0.85
         : 0.7;
 
-    const model = "gpt-4o-mini";
+    const model = "gpt-4o";
 
     if (DEBUG_CHAT) {
       console.log("[CHAT DEBUG] request", {
@@ -570,15 +698,25 @@ app.post("/chat", async (req, res) => {
     let contextMessages = [];
 
     if (threadSummary) {
-      // Use summary + recent messages instead of full history
+      // When a summary is present, the context is:
+      //   [system] → [summary] → [older messages] → [recent messages]
+      //
+      // recentMessages contains the last N turns fetched fresh from the thread store.
+      // We strip those same N turns from the tail of `messages` to avoid duplicates —
+      // without this, the last N turns appear twice in the context window.
+      const recentCount = recentMessages.length;
+      const olderMessages = recentCount > 0
+        ? messages.slice(0, -recentCount)
+        : messages;
+
       contextMessages = [
         { role: "system", content: systemPrompt },
         { role: "system", content: `Thread context: ${threadSummary}` },
+        ...olderMessages,
         ...recentMessages.map((m) => ({ role: m.role, content: m.content })),
-        ...messages,
       ];
     } else {
-      // Fallback to original behavior
+      // No summary — send full history as-is
       contextMessages = [{ role: "system", content: systemPrompt }, ...messages];
     }
 
@@ -622,7 +760,7 @@ app.post("/chat", async (req, res) => {
 // -----------------------------------
 // Summarize Endpoint
 // -----------------------------------
-app.post("/summarize", async (req, res) => {
+app.post("/summarize", requireAuth, async (req, res) => {
   try {
     const { messages = [], mode = "SFW" } = req.body;
 
@@ -648,7 +786,12 @@ app.post("/summarize", async (req, res) => {
       })
       .join("\n\n");
 
-    // Summarization prompt
+    // Summarization prompt — mode-aware so NSFW context stays in NSFW summaries
+    // and doesn't bleed into SFW sessions if the user switches modes.
+    const modeNote = mode === "NSFW"
+      ? "This is an NSFW conversation. Summarize content accurately including mature themes."
+      : "This is an SFW conversation. Keep the summary appropriate and non-explicit.";
+
     const systemPrompt = `You are summarizing a conversation between the user and Bromo (an AI companion).
 
 Create a concise 2-3 sentence summary that captures:
@@ -656,12 +799,12 @@ Create a concise 2-3 sentence summary that captures:
 - User's current emotional state or context
 - Key preferences or facts mentioned
 
-Keep it brief and factual. This will be used as context for future messages.`;
+Keep it brief and factual. This will be used as context for future messages. ${modeNote}`;
 
     const userPrompt = `Summarize this conversation:\n\n${conversationText}`;
 
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
@@ -691,7 +834,7 @@ Keep it brief and factual. This will be used as context for future messages.`;
 // -----------------------------------
 
 // GET /memories - List all memories for a device
-app.get("/memories", async (req, res) => {
+app.get("/memories", requireAuth, async (req, res) => {
   try {
     const { device_id, mode } = req.query;
 
@@ -700,6 +843,10 @@ app.get("/memories", async (req, res) => {
         ok: false,
         error: "device_id required",
       });
+    }
+
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Memory storage is not available." });
     }
 
     let query = "SELECT * FROM memories WHERE device_id = $1 AND confidence = 'high'";
@@ -726,7 +873,7 @@ app.get("/memories", async (req, res) => {
 });
 
 // POST /memories - Create a new memory
-app.post("/memories", async (req, res) => {
+app.post("/memories", requireAuth, async (req, res) => {
   try {
     const { device_id, key, value, mode = null } = req.body;
 
@@ -735,6 +882,10 @@ app.post("/memories", async (req, res) => {
         ok: false,
         error: "device_id, key, and value required",
       });
+    }
+
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Memory storage is not available." });
     }
 
     const result = await db.query(
@@ -757,7 +908,7 @@ app.post("/memories", async (req, res) => {
 });
 
 // PUT /memories/:id - Update a memory
-app.put("/memories/:id", async (req, res) => {
+app.put("/memories/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
     const { value, mode } = req.body;
@@ -767,6 +918,10 @@ app.put("/memories/:id", async (req, res) => {
         ok: false,
         error: "value required",
       });
+    }
+
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Memory storage is not available." });
     }
 
     const result = await db.query(
@@ -795,9 +950,13 @@ app.put("/memories/:id", async (req, res) => {
 });
 
 // DELETE /memories/:id - Delete a memory
-app.delete("/memories/:id", async (req, res) => {
+app.delete("/memories/:id", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
+
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Memory storage is not available." });
+    }
 
     const result = await db.query("DELETE FROM memories WHERE id = $1 RETURNING *", [id]);
 
@@ -872,18 +1031,22 @@ function shouldTriggerDetection(messages) {
     return false;
   }
 
-  // PHASE 4: Only trigger if high-value patterns likely present
-  const hasIdentityLanguage = /\b(?:my name is|call me|i'm a|i work as)\b/i.test(lastMessage);
-  const hasBoundaryLanguage = /\b(?:never|don't ever|don't mention|boundaries?)\b/i.test(lastMessage);
+  // Check recent user messages (not just the last one) for high-value patterns.
+  // Previously only checked lastMessage, which meant preferences stated a few turns
+  // ago were invisible to the gate by the time the 5-message trigger fired.
+  const recentText = recentUserMessages.join(" ");
+
+  const hasIdentityLanguage = /\b(?:my name is|call me|i'm a|i work as)\b/i.test(recentText);
+  const hasBoundaryLanguage = /\b(?:never|don't ever|don't mention|boundaries?)\b/i.test(recentText);
   const hasPreferenceLanguage = /\b(?:i love|i like|i enjoy|i prefer|i'm into|i hate|i dislike)\b/i.test(
-    lastMessage
+    recentText
   );
 
   const hasHighValuePattern = hasIdentityLanguage || hasBoundaryLanguage || hasPreferenceLanguage;
 
   if (!hasHighValuePattern) {
     if (DEBUG_CHAT) {
-      console.log("[DETECT] Skipping: No high-value patterns detected");
+      console.log("[DETECT] Skipping: No high-value patterns in recent messages");
     }
     return false;
   }
@@ -892,7 +1055,7 @@ function shouldTriggerDetection(messages) {
 }
 
 // POST /detect-memory - Analyze recent messages for memorable facts
-app.post("/detect-memory", async (req, res) => {
+app.post("/detect-memory", requireAuth, async (req, res) => {
   try {
     const { messages = [], mode = "SFW" } = req.body;
 
