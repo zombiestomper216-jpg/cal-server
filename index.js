@@ -26,12 +26,10 @@ const DEBUG_CHAT = String(process.env.DEBUG_CHAT || "").toLowerCase() === "true"
 console.log("BOOT env check:", {
   hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
   hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
-  portEnv: process.env.PORT ?? null,
-  debugChat: DEBUG_CHAT,
+  // add any other “hasX” flags you want
 });
 
 const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
 });
 
 // -----------------------------------
