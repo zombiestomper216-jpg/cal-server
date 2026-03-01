@@ -32,7 +32,6 @@ console.log("BOOT env check:", {
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
-});
 
 // -----------------------------------
 // Postgres
@@ -1119,6 +1118,8 @@ app.listen(PORT, "0.0.0.0", () => {
 });
 
 // Keepalive log (helps confirm it isn't being killed)
-setInterval(() => {
-  console.log("💚 still alive", { port: PORT, portEnv: process.env.PORT ?? null, ts: Date.now() });
-}, 30000);
+if (DEBUG_CHAT) {
+  setInterval(() => {
+    console.log("💚 still alive", { port: PORT, portEnv: process.env.PORT ?? null, ts: Date.now() });
+  }, 30000);
+}
