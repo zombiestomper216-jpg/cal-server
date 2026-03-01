@@ -30,6 +30,8 @@ console.log("BOOT env check:", {
 });
 
 const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 });
 
 // -----------------------------------
