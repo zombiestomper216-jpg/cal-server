@@ -714,9 +714,6 @@ app.post("/chat", requireAuth, async (req, res) => {
     // -----------------------------------
     // NSFW Adult Verification Gate
     // -----------------------------------
-    // NSFW mode requires a token that belongs to TESTER_ADULT_CODES.
-    // The client-side adultVerified flag is intentionally NOT trusted here —
-    // only the server-side token check is authoritative.
     if (mode === "NSFW" && !isAdultVerifiedToken(req)) {
       if (DEBUG_CHAT) {
         console.log("[CHAT DEBUG] blocked: nsfw_not_verified", {
@@ -732,9 +729,6 @@ app.post("/chat", requireAuth, async (req, res) => {
       });
     }
 
-    // Filter and prioritize memories through buildMemoryContext before injecting
-    // into the prompt. Without this, all client-provided memories are passed raw —
-    // including wrong-mode memories and low-confidence entries.
     const filteredMemories = buildMemoryContext(memories, mode);
     const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories });
     const patchApplied = isNsfwPatchApplied({ mode, pace });
@@ -748,7 +742,7 @@ app.post("/chat", requireAuth, async (req, res) => {
           : 0.85
         : 0.7;
 
-    const model = "gpt-4o";
+    const model = "gpt-4.1";
 
     if (DEBUG_CHAT) {
       console.log("[CHAT DEBUG] request", {
@@ -770,46 +764,45 @@ app.post("/chat", requireAuth, async (req, res) => {
     let contextMessages = [];
 
     if (threadSummary) {
-      // When a summary is present, the context is:
-      //   [system] → [summary] → [older messages] → [recent messages]
-      //
-      // recentMessages contains the last N turns fetched fresh from the thread store.
-      // We strip those same N turns from the tail of `messages` to avoid duplicates —
-      // without this, the last N turns appear twice in the context window.
       const recentCount = recentMessages.length;
-      const olderMessages = recentCount > 0
-        ? messages.slice(0, -recentCount)
-        : messages;
+      const olderMessages = recentCount > 0 ? messages.slice(0, -recentCount) : messages;
 
-contextMessages = [
-  { role: "system", content: systemPrompt },
-  { role: "system", content: `Thread context: ${threadSummary}` },
-  ...olderMessages,
-  ...recentMessages.map((m) => ({
-    role: String(m.role || "").toLowerCase() === "assistant" ? "assistant" : "user",
-    content: m.content
-  })),
-];
+      contextMessages = [
+        { role: "system", content: systemPrompt },
+        { role: "system", content: `Thread context: ${threadSummary}` },
+        ...olderMessages,
+        ...recentMessages.map((m) => ({
+          role: String(m.role || "").toLowerCase() === "assistant" ? "assistant" : "user",
+          content: m.content,
+        })),
+      ];
     } else {
-      // No summary — send full history as-is
       contextMessages = [{ role: "system", content: systemPrompt }, ...messages];
     }
 
+    const normalizedMessages = contextMessages.map((m) => {
+      const role = String(m.role || "").toLowerCase();
+
+      if (role === "user" || role === "assistant" || role === "system") {
+        return { role, content: m.content };
+      }
+
+      return { role: "user", content: m.content };
+    });
+
+    if (DEBUG_CHAT) {
+      console.log(
+        "[CHAT DEBUG] normalized roles",
+        normalizedMessages.map((m, i) => `${i}:${m.role}`)
+      );
+    }
+
     const completion = await openai.chat.completions.create({
-  model: "gpt-4.1",
-  messages: contextMessages.map((m) => {
-  const role = String(m.role || "").toLowerCase();
-
-  if (role === "user" || role === "assistant" || role === "system") {
-    return { role, content: m.content };
-  }
-
-  // fallback safety
-  return { role: "user", content: m.content };
-}),
-  temperature: 0.85,
-  frequency_penalty: 0.6
-});
+      model,
+      messages: normalizedMessages,
+      temperature,
+      frequency_penalty: 0.6,
+    });
 
     const rawReply = completion?.choices?.[0]?.message?.content ?? "(no reply)";
     const reply = softenEarlySnap(rawReply, messages);
@@ -841,7 +834,6 @@ contextMessages = [
     return res.status(500).json({ ok: false, error: "Chat failed" });
   }
 });
-
 // -----------------------------------
 // Summarize Endpoint
 // -----------------------------------
@@ -863,7 +855,6 @@ app.post("/summarize", requireAuth, async (req, res) => {
       });
     }
 
-    // Build conversation text
     const conversationText = messages
       .map((m) => {
         const speaker = m.role === "user" ? "User" : "Bromo";
@@ -871,11 +862,10 @@ app.post("/summarize", requireAuth, async (req, res) => {
       })
       .join("\n\n");
 
-    // Summarization prompt — mode-aware so NSFW context stays in NSFW summaries
-    // and doesn't bleed into SFW sessions if the user switches modes.
-    const modeNote = mode === "NSFW"
-      ? "This is an NSFW conversation. Summarize content accurately including mature themes."
-      : "This is an SFW conversation. Keep the summary appropriate and non-explicit.";
+    const modeNote =
+      mode === "NSFW"
+        ? "This is an NSFW conversation. Summarize content accurately including mature themes."
+        : "This is an SFW conversation. Keep the summary appropriate and non-explicit.";
 
     const systemPrompt = `You are summarizing a conversation between the user and Bromo (an AI companion).
 
@@ -887,30 +877,6 @@ Create a concise 2-3 sentence summary that captures:
 Keep it brief and factual. This will be used as context for future messages. ${modeNote}`;
 
     const userPrompt = `Summarize this conversation:\n\n${conversationText}`;
-
-const normalizedMessages = contextMessages.map((m) => {
-  const role = String(m.role || "").toLowerCase();
-
-  if (role === "user" || role === "assistant" || role === "system") {
-    return { role, content: m.content };
-  }
-
-  return { role: "user", content: m.content };
-});
-
-if (DEBUG_CHAT) {
-  console.log(
-    "[CHAT DEBUG] normalized roles",
-    normalizedMessages.map((m, i) => `${i}:${m.role}`)
-  );
-}
-
-const completion = await openai.chat.completions.create({
-  model: "gpt-4.1",
-  messages: normalizedMessages,
-  temperature: 0.85,
-  frequency_penalty: 0.6
-});
 
     const completion = await openai.chat.completions.create({
       model: "gpt-4.1",
@@ -937,7 +903,6 @@ const completion = await openai.chat.completions.create({
     return res.status(500).json({ ok: false, error: "Summarization failed" });
   }
 });
-
 // -----------------------------------
 // Memory Endpoints (Phase 2)
 // -----------------------------------
