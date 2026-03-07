@@ -551,9 +551,45 @@ function detectMemoriesHeuristic(userText) {
         // Skip very short matches (likely false positives)
         if (value.length < 3) continue;
 
+        // Phase 11.7: Skip overly long captures (usually vague / messy / low quality)
+        if (value.length > 80) continue;
+
+        // Phase 11.7: Reject obvious roleplay / hypothetical / joke-ish fragments
+const lowerValue = value.toLowerCase();
+
+// Reject vulgar fragments
+const blockedFragments = [
+  "fucking",
+  "fuck",
+  "messing with",
+  "trolling",
+  "playing with",
+  "screwing with"
+];
+
+if (blockedFragments.some(word => lowerValue.includes(word))) {
+  continue;
+}
+
+// Reject behavior phrases involving people
+if (/\b(fuck|mess|play|screw|troll)\b.*\b(people|someone|others)\b/i.test(lowerValue)) {
+  continue;
+}
+
+// Reject roleplay / joking phrases
+if (
+  lowerValue.includes("pretend") ||
+  lowerValue.includes("roleplay") ||
+  lowerValue.includes("what if") ||
+  lowerValue.includes("maybe") ||
+  lowerValue.includes("kidding") ||
+  lowerValue.includes("joking")
+) {
+  continue;
+}
+
         // PHASE 4: For identity category, check stopwords
         if (category === "identity") {
-          const lowerValue = value.toLowerCase();
           if (IDENTITY_STOPWORDS.some((word) => lowerValue === word || lowerValue.includes(word))) {
             if (DEBUG_CHAT) {
               console.log(`[DETECT] Skipping identity stopword: "${value}"`);
@@ -576,9 +612,9 @@ function detectMemoriesHeuristic(userText) {
     }
   }
 
-  return detected;
+  // Phase 11.7: Remove duplicate / near-identical suggestions
+  return dedupeDetectedMemories(detected);
 }
-
 /**
  * PHASE 4: Format detected value into natural, relational statement
  */
@@ -597,6 +633,43 @@ function formatMemoryValue(category, rawValue) {
     default:
       return rawValue;
   }
+}
+
+function containsCorrection(text) {
+  const t = String(text || "").toLowerCase();
+
+  return (
+    t.includes("actually") ||
+    t.includes("wait") ||
+    t.includes("i meant") ||
+    t.includes("that was wrong") ||
+    t.includes("that's wrong") ||
+    t.includes("correction") ||
+    t.includes("to be clear") ||
+    t.includes("let me correct that") ||
+    t.includes("scratch that")
+  );
+}
+
+function dedupeDetectedMemories(memories) {
+  const seen = new Set();
+  const unique = [];
+
+  for (const memory of memories) {
+    const normalized = String(memory?.value || "")
+      .toLowerCase()
+      .replace(/[^\w\s]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (!normalized) continue;
+    if (seen.has(normalized)) continue;
+
+    seen.add(normalized);
+    unique.push(memory);
+  }
+
+  return unique;
 }
 
 // -----------------------------------
@@ -708,22 +781,35 @@ app.post("/chat", requireAuth, async (req, res) => {
         ? messages.slice(0, -recentCount)
         : messages;
 
-      contextMessages = [
-        { role: "system", content: systemPrompt },
-        { role: "system", content: `Thread context: ${threadSummary}` },
-        ...olderMessages,
-        ...recentMessages.map((m) => ({ role: m.role, content: m.content })),
-      ];
+contextMessages = [
+  { role: "system", content: systemPrompt },
+  { role: "system", content: `Thread context: ${threadSummary}` },
+  ...olderMessages,
+  ...recentMessages.map((m) => ({
+    role: String(m.role || "").toLowerCase() === "assistant" ? "assistant" : "user",
+    content: m.content
+  })),
+];
     } else {
       // No summary — send full history as-is
       contextMessages = [{ role: "system", content: systemPrompt }, ...messages];
     }
 
     const completion = await openai.chat.completions.create({
-      model,
-      messages: contextMessages,
-      temperature,
-    });
+  model: "gpt-4.1",
+  messages: contextMessages.map((m) => {
+  const role = String(m.role || "").toLowerCase();
+
+  if (role === "user" || role === "assistant" || role === "system") {
+    return { role, content: m.content };
+  }
+
+  // fallback safety
+  return { role: "user", content: m.content };
+}),
+  temperature: 0.85,
+  frequency_penalty: 0.6
+});
 
     const rawReply = completion?.choices?.[0]?.message?.content ?? "(no reply)";
     const reply = softenEarlySnap(rawReply, messages);
@@ -802,8 +888,32 @@ Keep it brief and factual. This will be used as context for future messages. ${m
 
     const userPrompt = `Summarize this conversation:\n\n${conversationText}`;
 
+const normalizedMessages = contextMessages.map((m) => {
+  const role = String(m.role || "").toLowerCase();
+
+  if (role === "user" || role === "assistant" || role === "system") {
+    return { role, content: m.content };
+  }
+
+  return { role: "user", content: m.content };
+});
+
+if (DEBUG_CHAT) {
+  console.log(
+    "[CHAT DEBUG] normalized roles",
+    normalizedMessages.map((m, i) => `${i}:${m.role}`)
+  );
+}
+
+const completion = await openai.chat.completions.create({
+  model: "gpt-4.1",
+  messages: normalizedMessages,
+  temperature: 0.85,
+  frequency_penalty: 0.6
+});
+
     const completion = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4.1",
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
@@ -988,16 +1098,34 @@ function shouldTriggerDetection(messages) {
 
   // Get last few user messages
   const recentUserMessages = messages
-    .filter((m) => m.role === "user")
+    .filter((m) => m.role === "user" && typeof m.content === "string")
     .slice(-5)
-    .map((m) => m.content);
+    .map((m) => m.content.trim())
+    .filter(Boolean);
 
   if (recentUserMessages.length === 0) return false;
 
-  // PHASE 4: Skip detection during rapid-fire short replies
+  const recentText = recentUserMessages.join(" ");
+
+  const hasIdentityLanguage = /\b(?:my name is|call me|i'm a|i work as)\b/i.test(recentText);
+  const hasBoundaryLanguage = /\b(?:never|don't ever|don't mention|boundaries?)\b/i.test(recentText);
+  const hasPreferenceLanguage = /\b(?:i love|i like|i enjoy|i prefer|i'm into|i hate|i dislike)\b/i.test(
+    recentText
+  );
+
+  const hasHighValuePattern = hasIdentityLanguage || hasBoundaryLanguage || hasPreferenceLanguage;
+
+  // Phase 11.7: If the user clearly said something memory-worthy,
+  // do not block detection just because the messages are short.
+  if (hasHighValuePattern) {
+    return true;
+  }
+
+  // Otherwise still guard against rapid-fire short chatter
   const avgLength =
-    recentUserMessages.reduce((sum, msg) => sum + msg.split(" ").length, 0) /
+    recentUserMessages.reduce((sum, msg) => sum + msg.split(/\s+/).length, 0) /
     recentUserMessages.length;
+
   if (avgLength < 5) {
     if (DEBUG_CHAT) {
       console.log("[DETECT] Skipping: Average message length too short (rapid-fire)");
@@ -1005,7 +1133,7 @@ function shouldTriggerDetection(messages) {
     return false;
   }
 
-  // PHASE 4: Skip during high escalation NSFW sequences
+  // Skip during high escalation NSFW sequences
   const lastMessage = recentUserMessages[recentUserMessages.length - 1].toLowerCase();
   const nsfwEscalationKeywords = [
     "fuck",
@@ -1020,6 +1148,7 @@ function shouldTriggerDetection(messages) {
     "harder",
     "deeper",
   ];
+
   const hasMultipleNsfwKeywords =
     nsfwEscalationKeywords.filter((kw) => lastMessage.includes(kw)).length >= 2;
 
@@ -1030,27 +1159,11 @@ function shouldTriggerDetection(messages) {
     return false;
   }
 
-  // Check recent user messages (not just the last one) for high-value patterns.
-  // Previously only checked lastMessage, which meant preferences stated a few turns
-  // ago were invisible to the gate by the time the 5-message trigger fired.
-  const recentText = recentUserMessages.join(" ");
-
-  const hasIdentityLanguage = /\b(?:my name is|call me|i'm a|i work as)\b/i.test(recentText);
-  const hasBoundaryLanguage = /\b(?:never|don't ever|don't mention|boundaries?)\b/i.test(recentText);
-  const hasPreferenceLanguage = /\b(?:i love|i like|i enjoy|i prefer|i'm into|i hate|i dislike)\b/i.test(
-    recentText
-  );
-
-  const hasHighValuePattern = hasIdentityLanguage || hasBoundaryLanguage || hasPreferenceLanguage;
-
-  if (!hasHighValuePattern) {
-    if (DEBUG_CHAT) {
-      console.log("[DETECT] Skipping: No high-value patterns in recent messages");
-    }
-    return false;
+  if (DEBUG_CHAT) {
+    console.log("[DETECT] Skipping: No high-value patterns in recent messages");
   }
 
-  return true;
+  return false;
 }
 
 // POST /detect-memory - Analyze recent messages for memorable facts
@@ -1082,13 +1195,35 @@ app.post("/detect-memory", requireAuth, async (req, res) => {
       console.log("[DETECT DEBUG] Analyzing", messages.length, "messages for memories");
     }
 
-    // Combine recent user messages for analysis
-    const userMessages = messages
-      .filter((m) => m.role === "user")
-      .map((m) => m.content)
-      .join(" ");
+    // Phase 11.7: Only analyze the most recent user messages
+    const recentUserMessages = messages
+      .filter((m) => m.role === "user" && typeof m.content === "string")
+      .slice(-2)
+      .map((m) => m.content.trim())
+      .filter(Boolean);
 
-    // Use heuristic detection
+    if (recentUserMessages.length === 0) {
+      return res.json({
+        ok: true,
+        detected: [],
+        count: 0,
+        skipped: true,
+      });
+    }
+
+    // Phase 11.7: If a correction is detected, only trust the latest message
+    const combinedRecentText = recentUserMessages.join(" ");
+    const userMessages = containsCorrection(combinedRecentText)
+      ? recentUserMessages.slice(-1).join(" ")
+      : recentUserMessages.join(" ");
+
+    if (DEBUG_CHAT) {
+      console.log("[DETECT DEBUG] Recent user messages:", recentUserMessages);
+      console.log("[DETECT DEBUG] Correction detected:", containsCorrection(combinedRecentText));
+      console.log("[DETECT DEBUG] Detection input:", userMessages);
+    }
+
+    // Use heuristic detection on narrowed input
     const detected = detectMemoriesHeuristic(userMessages);
 
     if (DEBUG_CHAT) {
@@ -1106,7 +1241,6 @@ app.post("/detect-memory", requireAuth, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Detection failed" });
   }
 });
-
 // -----------------------------------
 // Start Server (Railway expects process.env.PORT)
 // -----------------------------------
