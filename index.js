@@ -4,6 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import OpenAI from "openai";
 import pg from "pg";
+import rateLimit from "express-rate-limit";
 
 import {
   BROMO_SFW_SYSTEM_PROMPT_V2,
@@ -129,12 +130,12 @@ function buildSystemPrompt({ mode, pace, memories = [] }) {
       basePrompt = BROMO_NSFW_SYSTEM_PROMPT_V2;
     }
   } else {
-basePrompt = BROMO_SFW_SYSTEM_PROMPT_V2;  }
+    basePrompt = BROMO_SFW_SYSTEM_PROMPT_V2;
+  }
 
-  // PHASE 4: Natural memory injection (limit to 50 max, prioritize recent)
+  // PHASE 4: Natural memory injection (buildMemoryContext already limits to 50)
   if (memories && memories.length > 0) {
-    // Limit to 50 memories max
-    const limitedMemories = memories.slice(0, 50);
+    const limitedMemories = memories;
 
     // Convert to natural, relational language
     const memoryLines = limitedMemories
@@ -673,9 +674,22 @@ function dedupeDetectedMemories(memories) {
 }
 
 // -----------------------------------
+// Rate Limiting
+// -----------------------------------
+
+// 30 messages per minute per IP — generous for a real user, enough to block runaway loops
+const chatRateLimit = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "Too many requests.", errorCode: "rate_limit", retryable: true },
+});
+
+// -----------------------------------
 // Chat Endpoint
 // -----------------------------------
-app.post("/chat", requireAuth, async (req, res) => {
+app.post("/chat", requireAuth, chatRateLimit, async (req, res) => {
   try {
     const { messages = [], mode = "SFW", threadSummary = null, recentMessages = [], memories = [] } =
       req.body;
@@ -797,12 +811,16 @@ app.post("/chat", requireAuth, async (req, res) => {
       );
     }
 
-    const completion = await openai.chat.completions.create({
-      model,
-      messages: normalizedMessages,
-      temperature,
-      frequency_penalty: 0.6,
-    });
+    // 28s timeout — gives Railway a clean window before the 30s gateway cutoff
+    const completion = await openai.chat.completions.create(
+      {
+        model,
+        messages: normalizedMessages,
+        temperature,
+        frequency_penalty: 0.6,
+      },
+      { signal: AbortSignal.timeout(28_000) }
+    );
 
     const rawReply = completion?.choices?.[0]?.message?.content ?? "(no reply)";
     const reply = softenEarlySnap(rawReply, messages);
@@ -830,8 +848,28 @@ app.post("/chat", requireAuth, async (req, res) => {
 
     return res.json({ ok: true, reply });
   } catch (err) {
-    console.error("CHAT ERROR:", err);
-    return res.status(500).json({ ok: false, error: "Chat failed" });
+    // Classify errors so the client can decide whether to retry
+    const isTimeout =
+      err?.name === "AbortError" ||
+      err?.code === "ETIMEDOUT" ||
+      err?.code === "ECONNRESET" ||
+      err?.message?.includes("timeout") ||
+      err?.message?.includes("aborted");
+
+    const isRateLimit =
+      err?.status === 429 || err?.message?.toLowerCase().includes("rate limit");
+
+    const errorCode = isTimeout ? "timeout" : isRateLimit ? "rate_limit" : "server_error";
+    const retryable = isTimeout || isRateLimit;
+
+    console.error("CHAT ERROR:", { errorCode, message: err?.message || String(err) });
+
+    return res.status(isRateLimit ? 429 : 500).json({
+      ok: false,
+      error: isTimeout ? "Request timed out." : isRateLimit ? "Too many requests." : "Chat failed.",
+      errorCode,
+      retryable,
+    });
   }
 });
 // -----------------------------------
