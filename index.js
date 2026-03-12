@@ -167,24 +167,47 @@ basePrompt = BROMO_SFW_SYSTEM_PROMPT_V2;  }
 }
 
 // PHASE 4: Modular memory context builder (prep for Phase 5 semantic search)
-function buildMemoryContext(allMemories, mode) {
+function buildMemoryContext(allMemories, mode, userText = "") {
   if (!allMemories || allMemories.length === 0) return [];
 
   // Filter by mode
   const filtered = allMemories.filter((m) => !m.mode || m.mode === mode || m.mode === null);
 
-  // PHASE 4: Prioritize high confidence, then by recency
+  // Extract simple keywords from user message
+  const userTerms = new Set(
+    String(userText || "")
+      .toLowerCase()
+      .match(/\b[a-z]{4,}\b/g) || []
+  );
+
+  function relevance(memory) {
+    const text = String(memory?.value || "").toLowerCase();
+    let score = 0;
+
+    for (const term of userTerms) {
+      if (text.includes(term)) score += 1;
+    }
+
+    return score;
+  }
+
   const sorted = filtered.sort((a, b) => {
-    // High confidence first
+    const relA = relevance(a);
+    const relB = relevance(b);
+
+    // 1️⃣ relevance to current message
+    if (relA !== relB) return relB - relA;
+
+    // 2️⃣ high confidence
     if (a.confidence === "high" && b.confidence !== "high") return -1;
     if (b.confidence === "high" && a.confidence !== "high") return 1;
 
-    // Then by updated_at (most recent first)
+    // 3️⃣ recency
     return new Date(b.updated_at) - new Date(a.updated_at);
   });
 
-  // Hard limit: 50 memories max
-  return sorted.slice(0, 50);
+  // Reduce prompt bloat (50 → 12)
+  return sorted.slice(0, 12);
 }
 
 function isNsfwPatchApplied({ mode, pace }) {
@@ -729,7 +752,7 @@ app.post("/chat", requireAuth, async (req, res) => {
       });
     }
 
-    const filteredMemories = buildMemoryContext(memories, mode);
+    const filteredMemories = buildMemoryContext(memories, mode, userText);
     const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories });
     const patchApplied = isNsfwPatchApplied({ mode, pace });
 
