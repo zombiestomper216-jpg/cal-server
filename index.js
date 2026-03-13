@@ -4,6 +4,9 @@ import cors from "cors";
 import dotenv from "dotenv";
 import OpenAI from "openai";
 import pg from "pg";
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
+import nodemailer from "nodemailer";
 
 import {
   BROMO_SFW_SYSTEM_PROMPT_V2,
@@ -22,11 +25,12 @@ app.use(express.json());
 // Toggle verbose debug without code changes (set on Railway)
 const DEBUG_CHAT = String(process.env.DEBUG_CHAT || "").toLowerCase() === "true";
 
-// Log env presence (safe – does NOT print secrets)
+// Log env presence (safe - does NOT print secrets)
 console.log("BOOT env check:", {
   hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
   hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
-  // add any other “hasX” flags you want
+  hasJwtSecret: Boolean(process.env.JWT_SECRET),
+  hasSmtp: Boolean(process.env.SMTP_HOST),
 });
 
 const openai = new OpenAI({
@@ -52,6 +56,27 @@ const db =
         ...(wantsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
       })
     : null;
+
+// -----------------------------------
+// JWT & Email Config
+// -----------------------------------
+const JWT_SECRET = process.env.JWT_SECRET || "";
+const BCRYPT_ROUNDS = 12;
+
+const smtpTransporter = process.env.SMTP_HOST
+  ? nodemailer.createTransport({
+      host: process.env.SMTP_HOST,
+      port: Number(process.env.SMTP_PORT) || 587,
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS,
+      },
+    })
+  : null;
+
+const SMTP_FROM = process.env.SMTP_FROM || "noreply@bromo.app";
+const APP_URL = process.env.APP_URL || "https://bromo.app";
 
 // -----------------------------------
 // Root
@@ -310,6 +335,24 @@ function makeSessionToken(prefix) {
   return `${prefix}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}`;
 }
 
+function signJwt(userId, adultVerified) {
+  if (!JWT_SECRET) throw new Error("JWT_SECRET not configured");
+  return jwt.sign(
+    { sub: userId, capability: adultVerified ? "NSFW" : "SFW", adult: adultVerified },
+    JWT_SECRET,
+    { expiresIn: "30d" }
+  );
+}
+
+function verifyJwt(token) {
+  if (!JWT_SECRET) return null;
+  try {
+    return jwt.verify(token, JWT_SECRET);
+  } catch {
+    return null;
+  }
+}
+
 // -----------------------------------
 // Token Verification Helpers
 // -----------------------------------
@@ -337,8 +380,10 @@ function extractTokenCode(req) {
  */
 function isAdultVerifiedToken(req) {
   const code = extractTokenCode(req);
-  if (!code) return false;
-  return TESTER_ADULT_CODES.has(code);
+  if (code) return TESTER_ADULT_CODES.has(code);
+  // For JWT-authenticated users, req.adultVerified is set by requireAuth
+  if (req.adultVerified) return true;
+  return false;
 }
 
 // -----------------------------------
@@ -378,6 +423,14 @@ function requireAuth(req, res, next) {
       if (DEBUG_CHAT) console.log("[AUTH] Rejected: unknown tester code", code);
       return res.status(401).json({ ok: false, error: "Invalid or expired token." });
     }
+    return next();
+  }
+
+  // --- JWT path ---
+  const jwtPayload = verifyJwt(token);
+  if (jwtPayload && jwtPayload.sub) {
+    req.userId = jwtPayload.sub;
+    req.adultVerified = Boolean(jwtPayload.adult);
     return next();
   }
 
@@ -462,6 +515,196 @@ app.post("/auth", (req, res) => {
     token: makeSessionToken("dev"),
     adultVerified: devAdultVerified,
   });
+});
+
+// -----------------------------------
+// User Auth Endpoints
+// -----------------------------------
+
+app.post("/signup", async (req, res) => {
+  try {
+    const { username, email, password } = req.body || {};
+
+    if (!username || !email || !password) {
+      return res.status(400).json({ ok: false, error: "username, email, and password required." });
+    }
+    if (typeof username !== "string" || username.length < 3 || username.length > 50) {
+      return res.status(400).json({ ok: false, error: "Username must be 3-50 characters." });
+    }
+    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+      return res.status(400).json({ ok: false, error: "Username may only contain letters, numbers, and underscores." });
+    }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ ok: false, error: "Invalid email format." });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ ok: false, error: "Password must be at least 8 characters." });
+    }
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Database not available." });
+    }
+    if (!JWT_SECRET) {
+      return res.status(500).json({ ok: false, error: "Auth not configured on server." });
+    }
+
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+    const result = await db.query(
+      `INSERT INTO users (username, email, password_hash)
+       VALUES ($1, $2, $3)
+       RETURNING id, username, email, adult_verified, created_at`,
+      [username.toLowerCase(), email.toLowerCase(), passwordHash]
+    );
+
+    const user = result.rows[0];
+    const token = signJwt(user.id, user.adult_verified);
+
+    return res.json({
+      ok: true,
+      token,
+      user: { id: user.id, username: user.username, email: user.email, adultVerified: user.adult_verified },
+    });
+  } catch (err) {
+    if (err.code === "23505") {
+      const detail = String(err.detail || "");
+      if (detail.includes("username")) {
+        return res.status(409).json({ ok: false, error: "Username already taken." });
+      }
+      if (detail.includes("email")) {
+        return res.status(409).json({ ok: false, error: "Email already registered." });
+      }
+      return res.status(409).json({ ok: false, error: "Username or email already taken." });
+    }
+    console.error("SIGNUP ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Signup failed." });
+  }
+});
+
+app.post("/login", async (req, res) => {
+  try {
+    const { username, password, device_id } = req.body || {};
+
+    if (!username || !password) {
+      return res.status(400).json({ ok: false, error: "username and password required." });
+    }
+    if (!db || !JWT_SECRET) {
+      return res.status(503).json({ ok: false, error: "Auth not available." });
+    }
+
+    const result = await db.query(
+      "SELECT id, username, email, password_hash, adult_verified FROM users WHERE username = $1",
+      [String(username).toLowerCase()]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ ok: false, error: "Invalid username or password." });
+    }
+
+    const user = result.rows[0];
+    const valid = await bcrypt.compare(password, user.password_hash);
+    if (!valid) {
+      return res.status(401).json({ ok: false, error: "Invalid username or password." });
+    }
+
+    let hasOrphanedMemories = false;
+    if (device_id) {
+      const orphanCheck = await db.query(
+        "SELECT 1 FROM memories WHERE device_id = $1 AND user_id IS NULL LIMIT 1",
+        [device_id]
+      );
+      hasOrphanedMemories = orphanCheck.rows.length > 0;
+    }
+
+    const token = signJwt(user.id, user.adult_verified);
+
+    return res.json({
+      ok: true,
+      token,
+      user: { id: user.id, username: user.username, email: user.email, adultVerified: user.adult_verified },
+      hasOrphanedMemories,
+    });
+  } catch (err) {
+    console.error("LOGIN ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Login failed." });
+  }
+});
+
+app.post("/forgot-password", async (req, res) => {
+  const genericResponse = { ok: true, message: "If that email is registered, a reset link has been sent." };
+
+  try {
+    const { email } = req.body || {};
+    if (!email || !db) return res.json(genericResponse);
+
+    const result = await db.query("SELECT id FROM users WHERE email = $1", [String(email).toLowerCase()]);
+    if (result.rows.length === 0) return res.json(genericResponse);
+
+    const userId = result.rows[0].id;
+    const resetToken = crypto.randomUUID();
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+
+    await db.query(
+      "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)",
+      [userId, resetToken, expiresAt]
+    );
+
+    if (smtpTransporter) {
+      try {
+        await smtpTransporter.sendMail({
+          from: SMTP_FROM,
+          to: email,
+          subject: "Bromo — Password Reset",
+          text: `Reset your password: ${APP_URL}/reset-password?token=${resetToken}\n\nThis link expires in 1 hour.`,
+          html: `<p>Reset your password:</p><p><a href="${APP_URL}/reset-password?token=${resetToken}">Click here</a></p><p>This link expires in 1 hour.</p>`,
+        });
+      } catch (emailErr) {
+        console.warn("Failed to send reset email:", emailErr?.message || emailErr);
+      }
+    } else {
+      console.warn("[FORGOT-PASSWORD] No SMTP configured. Reset token:", resetToken);
+    }
+
+    return res.json(genericResponse);
+  } catch (err) {
+    console.error("FORGOT-PASSWORD ERROR:", err);
+    return res.json(genericResponse);
+  }
+});
+
+app.post("/reset-password", async (req, res) => {
+  try {
+    const { token, password } = req.body || {};
+
+    if (!token || !password) {
+      return res.status(400).json({ ok: false, error: "token and password required." });
+    }
+    if (password.length < 8) {
+      return res.status(400).json({ ok: false, error: "Password must be at least 8 characters." });
+    }
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Database not available." });
+    }
+
+    const result = await db.query(
+      "SELECT id, user_id FROM password_reset_tokens WHERE token = $1 AND used = FALSE AND expires_at > NOW()",
+      [token]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(400).json({ ok: false, error: "Invalid or expired reset token." });
+    }
+
+    const { id: tokenId, user_id: userId } = result.rows[0];
+    const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+
+    await db.query("UPDATE users SET password_hash = $1 WHERE id = $2", [passwordHash, userId]);
+    await db.query("UPDATE password_reset_tokens SET used = TRUE WHERE id = $1", [tokenId]);
+
+    return res.json({ ok: true, message: "Password reset successfully." });
+  } catch (err) {
+    console.error("RESET-PASSWORD ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Password reset failed." });
+  }
 });
 
 // -----------------------------------
@@ -930,12 +1173,12 @@ Keep it brief and factual. This will be used as context for future messages. ${m
 // Memory Endpoints (Phase 2)
 // -----------------------------------
 
-// GET /memories - List all memories for a device
+// GET /memories - List all memories for a device or user
 app.get("/memories", requireAuth, async (req, res) => {
   try {
     const { device_id, mode } = req.query;
 
-    if (!device_id) {
+    if (!device_id && !req.userId) {
       return res.status(400).json({
         ok: false,
         error: "device_id required",
@@ -946,13 +1189,26 @@ app.get("/memories", requireAuth, async (req, res) => {
       return res.status(503).json({ ok: false, error: "Memory storage is not available." });
     }
 
-    let query = "SELECT * FROM memories WHERE device_id = $1 AND confidence = 'high'";
-    const params = [device_id];
+    const params = [];
+    let whereClause;
 
-    // Filter by mode if specified
+    if (req.userId && device_id) {
+      // JWT auth with device_id: get both transferred and untransferred memories
+      whereClause = "(device_id = $1 OR user_id = $2)";
+      params.push(device_id, req.userId);
+    } else if (req.userId) {
+      whereClause = "user_id = $1";
+      params.push(req.userId);
+    } else {
+      whereClause = "device_id = $1";
+      params.push(device_id);
+    }
+
+    let query = `SELECT * FROM memories WHERE ${whereClause} AND confidence = 'high'`;
+
     if (mode) {
-      query += " AND (mode = $2 OR mode IS NULL)";
       params.push(mode);
+      query += ` AND (mode = $${params.length} OR mode IS NULL)`;
     }
 
     query += " ORDER BY created_at DESC";
@@ -985,13 +1241,14 @@ app.post("/memories", requireAuth, async (req, res) => {
       return res.status(503).json({ ok: false, error: "Memory storage is not available." });
     }
 
+    const userId = req.userId || null;
     const result = await db.query(
-      `INSERT INTO memories (device_id, key, value, mode, confidence)
-       VALUES ($1, $2, $3, $4, 'high')
+      `INSERT INTO memories (device_id, key, value, mode, confidence, user_id)
+       VALUES ($1, $2, $3, $4, 'high', $5)
        ON CONFLICT (device_id, key)
-       DO UPDATE SET value = $3, mode = $4, updated_at = NOW()
+       DO UPDATE SET value = $3, mode = $4, user_id = COALESCE($5, memories.user_id), updated_at = NOW()
        RETURNING *`,
-      [device_id, key, value, mode]
+      [device_id, key, value, mode, userId]
     );
 
     return res.json({
@@ -1001,6 +1258,36 @@ app.post("/memories", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("POST /memories error:", err);
     return res.status(500).json({ ok: false, error: "Failed to create memory" });
+  }
+});
+
+// POST /memories/transfer - Transfer device memories to user account
+app.post("/memories/transfer", requireAuth, async (req, res) => {
+  try {
+    if (!req.userId) {
+      return res.status(401).json({ ok: false, error: "JWT authentication required for memory transfer." });
+    }
+
+    const { device_id } = req.body || {};
+    if (!device_id) {
+      return res.status(400).json({ ok: false, error: "device_id required." });
+    }
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Database not available." });
+    }
+
+    const result = await db.query(
+      "UPDATE memories SET user_id = $1 WHERE device_id = $2 AND user_id IS NULL RETURNING id",
+      [req.userId, device_id]
+    );
+
+    return res.json({
+      ok: true,
+      transferred: result.rows.length,
+    });
+  } catch (err) {
+    console.error("MEMORY TRANSFER ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Memory transfer failed." });
   }
 });
 
