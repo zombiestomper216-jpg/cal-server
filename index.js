@@ -6,7 +6,7 @@ import OpenAI from "openai";
 import pg from "pg";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
-import nodemailer from "nodemailer";
+import { Resend } from "resend";
 
 import {
   BROMO_SFW_SYSTEM_PROMPT_V2,
@@ -30,7 +30,7 @@ console.log("BOOT env check:", {
   hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
   hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
   hasJwtSecret: Boolean(process.env.JWT_SECRET),
-  hasSmtp: Boolean(process.env.SMTP_HOST),
+  hasResend: Boolean(process.env.RESEND_API_KEY),
 });
 
 const openai = new OpenAI({
@@ -63,19 +63,11 @@ const db =
 const JWT_SECRET = process.env.JWT_SECRET || "";
 const BCRYPT_ROUNDS = 12;
 
-const smtpTransporter = process.env.SMTP_HOST
-  ? nodemailer.createTransport({
-      host: process.env.SMTP_HOST,
-      port: Number(process.env.SMTP_PORT) || 587,
-      secure: false,
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS,
-      },
-    })
+const resend = process.env.RESEND_API_KEY
+  ? new Resend(process.env.RESEND_API_KEY)
   : null;
 
-const SMTP_FROM = process.env.SMTP_FROM || "noreply@bromo.app";
+const EMAIL_FROM = process.env.EMAIL_FROM || "Bromo <onboarding@resend.dev>";
 const APP_URL = process.env.APP_URL || "https://bromo.app";
 
 // -----------------------------------
@@ -648,10 +640,10 @@ app.post("/forgot-password", async (req, res) => {
       [userId, resetToken, expiresAt]
     );
 
-    if (smtpTransporter) {
+    if (resend) {
       try {
-        await smtpTransporter.sendMail({
-          from: SMTP_FROM,
+        await resend.emails.send({
+          from: EMAIL_FROM,
           to: email,
           subject: "Bromo — Password Reset",
           text: `Reset your password: ${APP_URL}/reset-password?token=${resetToken}\n\nThis link expires in 1 hour.`,
@@ -661,7 +653,7 @@ app.post("/forgot-password", async (req, res) => {
         console.warn("Failed to send reset email:", emailErr?.message || emailErr);
       }
     } else {
-      console.warn("[FORGOT-PASSWORD] No SMTP configured. Reset token:", resetToken);
+      console.warn("[FORGOT-PASSWORD] No RESEND_API_KEY configured. Reset token:", resetToken);
     }
 
     return res.json(genericResponse);
