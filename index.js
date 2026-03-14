@@ -671,11 +671,25 @@ app.get("/reset-password", (req, res) => {
   }
   const deepLink = `bromo://reset-password?token=${encodeURIComponent(token)}`;
   res.send(`<!DOCTYPE html>
-<html><head><meta charset="utf-8"><title>Bromo — Password Reset</title>
-<meta http-equiv="refresh" content="0;url=${deepLink}">
+<html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bromo — Password Reset</title>
 </head><body style="font-family:system-ui;text-align:center;padding:60px 20px">
-<h2>Redirecting to Bromo...</h2>
-<p>If the app didn't open, <a href="${deepLink}">tap here</a>.</p>
+<h2>Opening Bromo...</h2>
+<p><a href="${deepLink}" id="open-btn"
+      style="display:inline-block;padding:14px 28px;background:#111;color:#fff;
+             border-radius:8px;text-decoration:none;font-size:16px">
+  Open in Bromo
+</a></p>
+<p id="fallback" style="display:none;margin-top:24px;color:#666">
+  App didn't open? Make sure Bromo is installed, then tap the button above.
+</p>
+<script>
+  window.location.href = "${deepLink}";
+  setTimeout(function() {
+    document.getElementById('fallback').style.display = 'block';
+  }, 2000);
+</script>
 </body></html>`);
 });
 
@@ -705,8 +719,14 @@ app.post("/reset-password", async (req, res) => {
     const { id: tokenId, user_id: userId } = result.rows[0];
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
 
-    await db.query("UPDATE users SET password_hash = $1 WHERE id = $2", [passwordHash, userId]);
+    const updateResult = await db.query("UPDATE users SET password_hash = $1 WHERE id = $2", [passwordHash, userId]);
+    if (updateResult.rowCount === 0) {
+      console.error("RESET-PASSWORD: UPDATE matched 0 rows for user_id:", userId);
+      return res.status(500).json({ ok: false, error: "Password reset failed — user not found." });
+    }
+
     await db.query("UPDATE password_reset_tokens SET used = TRUE WHERE id = $1", [tokenId]);
+    console.log("RESET-PASSWORD: password updated for user_id:", userId);
 
     return res.json({ ok: true, message: "Password reset successfully." });
   } catch (err) {
