@@ -68,7 +68,7 @@ const resend = process.env.RESEND_API_KEY
   : null;
 
 const EMAIL_FROM = process.env.EMAIL_FROM || "Bromo <onboarding@resend.dev>";
-const APP_URL = process.env.APP_URL || "https://bromo.app";
+const APP_URL = process.env.APP_URL || "https://bromo-nsfw-production.up.railway.app";
 
 // -----------------------------------
 // Root
@@ -661,6 +661,22 @@ app.post("/forgot-password", async (req, res) => {
     console.error("FORGOT-PASSWORD ERROR:", err);
     return res.json(genericResponse);
   }
+});
+
+// GET /reset-password — redirect from email link to app deep link
+app.get("/reset-password", (req, res) => {
+  const { token } = req.query;
+  if (!token) {
+    return res.status(400).send("Missing reset token.");
+  }
+  const deepLink = `bromo://reset-password?token=${encodeURIComponent(token)}`;
+  res.send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Bromo — Password Reset</title>
+<meta http-equiv="refresh" content="0;url=${deepLink}">
+</head><body style="font-family:system-ui;text-align:center;padding:60px 20px">
+<h2>Redirecting to Bromo...</h2>
+<p>If the app didn't open, <a href="${deepLink}">tap here</a>.</p>
+</body></html>`);
 });
 
 app.post("/reset-password", async (req, res) => {
