@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e \"const fs = require\\(''fs''\\); const lines = fs.readFileSync\\(''index.js'',''utf8''\\).split\\(''\\\\n''\\); console.log\\(JSON.stringify\\(lines[28]\\)\\);\")",
+      "Bash(node --check index.js)",
+      "Bash(node -e \"require\\(''dotenv''\\).config\\(\\); console.log\\(''JWT_SECRET present:'', Boolean\\(process.env.JWT_SECRET\\), ''env count:'', Object.keys\\(process.env\\).filter\\(k=>[''JWT_SECRET'',''DATABASE_URL'',''OPENAI_API_KEY'',''SMTP_HOST''].includes\\(k\\)\\).join\\('',''\\)\\)\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(find /c/Users/Joey/cal-app -type f \\\\\\(-name *.xml -o -name *.plist \\\\\\))"
+    ]
+  }
+}
