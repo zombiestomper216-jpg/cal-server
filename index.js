@@ -514,12 +514,21 @@ app.post("/auth", async (req, res) => {
     }
 
     let hasOrphanedMemories = false;
+    let hasOtherDeviceMemories = false;
+    let otherDeviceIds = [];
     if (device_id) {
       const orphanCheck = await db.query(
         "SELECT 1 FROM memories WHERE device_id = $1 AND user_id IS NULL LIMIT 1",
         [device_id]
       );
       hasOrphanedMemories = orphanCheck.rows.length > 0;
+
+      const otherDeviceCheck = await db.query(
+        "SELECT DISTINCT device_id FROM memories WHERE user_id = $1 AND device_id != $2",
+        [user.id, device_id]
+      );
+      hasOtherDeviceMemories = otherDeviceCheck.rows.length > 0;
+      otherDeviceIds = otherDeviceCheck.rows.map(r => r.device_id);
     }
 
     const token = signJwt(user.id, user.adult_verified);
@@ -529,6 +538,8 @@ app.post("/auth", async (req, res) => {
       token,
       user: { id: user.id, username: user.username, email: user.email, adultVerified: user.adult_verified },
       hasOrphanedMemories,
+      hasOtherDeviceMemories,
+      otherDeviceIds,
     });
   } catch (err) {
     console.error("AUTH LOGIN ERROR:", err);
@@ -636,12 +647,21 @@ app.post("/login", async (req, res) => {
     }
 
     let hasOrphanedMemories = false;
+    let hasOtherDeviceMemories = false;
+    let otherDeviceIds = [];
     if (device_id) {
       const orphanCheck = await db.query(
         "SELECT 1 FROM memories WHERE device_id = $1 AND user_id IS NULL LIMIT 1",
         [device_id]
       );
       hasOrphanedMemories = orphanCheck.rows.length > 0;
+
+      const otherDeviceCheck = await db.query(
+        "SELECT DISTINCT device_id FROM memories WHERE user_id = $1 AND device_id != $2",
+        [user.id, device_id]
+      );
+      hasOtherDeviceMemories = otherDeviceCheck.rows.length > 0;
+      otherDeviceIds = otherDeviceCheck.rows.map(r => r.device_id);
     }
 
     const token = signJwt(user.id, user.adult_verified);
@@ -651,6 +671,8 @@ app.post("/login", async (req, res) => {
       token,
       user: { id: user.id, username: user.username, email: user.email, adultVerified: user.adult_verified },
       hasOrphanedMemories,
+      hasOtherDeviceMemories,
+      otherDeviceIds,
     });
   } catch (err) {
     console.error("LOGIN ERROR:", err);
@@ -1327,19 +1349,79 @@ app.post("/memories", requireAuth, async (req, res) => {
   }
 });
 
-// POST /memories/transfer - Transfer device memories to user account
+// POST /memories/transfer - Transfer memories (orphan-claim OR device-to-device)
 app.post("/memories/transfer", requireAuth, async (req, res) => {
   try {
     if (!req.userId) {
       return res.status(401).json({ ok: false, error: "JWT authentication required for memory transfer." });
     }
-
-    const { device_id } = req.body || {};
-    if (!device_id) {
-      return res.status(400).json({ ok: false, error: "device_id required." });
-    }
     if (!db) {
       return res.status(503).json({ ok: false, error: "Database not available." });
+    }
+
+    const { device_id, from_device_id, to_device_id } = req.body || {};
+
+    // --- Device-to-device transfer ---
+    if (from_device_id && to_device_id) {
+      if (from_device_id === to_device_id) {
+        return res.status(400).json({ ok: false, error: "from_device_id and to_device_id must be different." });
+      }
+
+      const client = await db.connect();
+      try {
+        await client.query("BEGIN");
+
+        // 1. Merge conflicts: update target rows with source values where key collides
+        const mergeResult = await client.query(
+          `UPDATE memories AS target
+           SET value = source.value,
+               mode = COALESCE(source.mode, target.mode),
+               user_id = COALESCE(target.user_id, source.user_id, $3),
+               updated_at = NOW()
+           FROM memories AS source
+           WHERE source.device_id = $1
+             AND target.device_id = $2
+             AND source.key = target.key
+             AND (source.user_id = $3 OR source.user_id IS NULL)`,
+          [from_device_id, to_device_id, req.userId]
+        );
+
+        // 2. Delete source rows that were merged (their key now exists on target)
+        await client.query(
+          `DELETE FROM memories
+           WHERE device_id = $1
+             AND (user_id = $2 OR user_id IS NULL)
+             AND key IN (SELECT key FROM memories WHERE device_id = $3)`,
+          [from_device_id, req.userId, to_device_id]
+        );
+
+        // 3. Move remaining source rows to target (no conflicts possible now)
+        const moveResult = await client.query(
+          `UPDATE memories
+           SET device_id = $2, user_id = COALESCE(user_id, $3), updated_at = NOW()
+           WHERE device_id = $1
+             AND (user_id = $3 OR user_id IS NULL)
+           RETURNING id`,
+          [from_device_id, to_device_id, req.userId]
+        );
+
+        await client.query("COMMIT");
+
+        return res.json({
+          ok: true,
+          transferred: mergeResult.rowCount + moveResult.rowCount,
+        });
+      } catch (err) {
+        await client.query("ROLLBACK");
+        throw err;
+      } finally {
+        client.release();
+      }
+    }
+
+    // --- Legacy orphan-claim transfer ---
+    if (!device_id) {
+      return res.status(400).json({ ok: false, error: "device_id (or from_device_id and to_device_id) required." });
     }
 
     const result = await db.query(
