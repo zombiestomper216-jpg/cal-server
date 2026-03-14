@@ -589,11 +589,20 @@ app.post("/login", async (req, res) => {
     );
 
     if (result.rows.length === 0) {
+      console.log("AUTH: no user found for username:", String(username).toLowerCase());
       return res.status(401).json({ ok: false, error: "Invalid username or password." });
     }
 
     const user = result.rows[0];
+    console.log("AUTH: lookup result", {
+      user_id: user.id,
+      username: user.username,
+      email: user.email,
+      has_password_hash: !!user.password_hash,
+      hash_prefix: user.password_hash?.substring(0, 7),
+    });
     const valid = await bcrypt.compare(password, user.password_hash);
+    console.log("AUTH: bcrypt.compare result", { user_id: user.id, valid });
     if (!valid) {
       return res.status(401).json({ ok: false, error: "Invalid username or password." });
     }
@@ -718,6 +727,7 @@ app.post("/reset-password", async (req, res) => {
 
     const { id: tokenId, user_id: userId } = result.rows[0];
     const passwordHash = await bcrypt.hash(password, BCRYPT_ROUNDS);
+    console.log("RESET-PASSWORD: updating", { userId, hash_prefix: passwordHash.substring(0, 7) });
 
     const updateResult = await db.query("UPDATE users SET password_hash = $1 WHERE id = $2", [passwordHash, userId]);
     if (updateResult.rowCount === 0) {
@@ -726,7 +736,7 @@ app.post("/reset-password", async (req, res) => {
     }
 
     await db.query("UPDATE password_reset_tokens SET used = TRUE WHERE id = $1", [tokenId]);
-    console.log("RESET-PASSWORD: password updated for user_id:", userId);
+    console.log("RESET-PASSWORD: password updated for user_id:", userId, "hash_prefix:", passwordHash.substring(0, 7));
 
     return res.json({ ok: true, message: "Password reset successfully." });
   } catch (err) {
