@@ -445,7 +445,7 @@ function requireAuth(req, res, next) {
   return res.status(401).json({ ok: false, error: "Invalid or expired token." });
 }
 
-app.post("/auth", (req, res) => {
+app.post("/auth", async (req, res) => {
   const body = req.body || {};
 
   // New path: tester code
@@ -471,8 +471,8 @@ app.post("/auth", (req, res) => {
     });
   }
 
-  // Legacy path: username/password (optional)
-  const { username, password } = body;
+  // Username/password path: check database
+  const { username, password, device_id } = body;
 
   if (!username || !password) {
     return res.status(400).json({
@@ -481,32 +481,58 @@ app.post("/auth", (req, res) => {
     });
   }
 
-  const devUser = process.env.DEV_AUTH_USER || process.env.AUTH_USER || "";
-  const devPass = process.env.DEV_AUTH_PASS || process.env.AUTH_PASS || "";
-
-  if (devUser && devPass) {
-    if (String(username).trim() !== devUser || String(password) !== devPass) {
-      return res.status(401).json({ ok: false, error: "Invalid credentials." });
-    }
-  } else {
-    // No dev creds configured — reject rather than silently allow.
-    // This prevents misconfigured production servers from accepting any credentials.
-    if (DEBUG_CHAT) console.log("[AUTH] Rejected: DEV_AUTH_USER/DEV_AUTH_PASS not configured.");
-    return res.status(500).json({
-      ok: false,
-      error: "Legacy auth is not configured on this server. Use a tester code.",
-    });
+  if (!db) {
+    return res.status(503).json({ ok: false, error: "Database not available." });
   }
 
-  // adultVerified on dev accounts is opt-in via DEV_ADULT_VERIFIED=true env var.
-  // Defaults to false so dev tokens don't silently gain NSFW access.
-  const devAdultVerified = String(process.env.DEV_ADULT_VERIFIED || "").toLowerCase() === "true";
+  try {
+    const result = await db.query(
+      "SELECT id, username, email, password_hash, adult_verified FROM users WHERE username = $1",
+      [String(username).toLowerCase()]
+    );
 
-  return res.json({
-    ok: true,
-    token: makeSessionToken("dev"),
-    adultVerified: devAdultVerified,
-  });
+    if (result.rows.length === 0) {
+      console.log("AUTH: no user found for username:", String(username).toLowerCase());
+      return res.status(401).json({ ok: false, error: "Invalid username or password." });
+    }
+
+    const user = result.rows[0];
+    console.log("AUTH: lookup result", {
+      user_id: user.id,
+      username: user.username,
+      email: user.email,
+      has_password_hash: !!user.password_hash,
+      hash_prefix: user.password_hash?.substring(0, 7),
+    });
+
+    const valid = await bcrypt.compare(password, user.password_hash);
+    console.log("AUTH: bcrypt.compare result", { user_id: user.id, valid });
+
+    if (!valid) {
+      return res.status(401).json({ ok: false, error: "Invalid username or password." });
+    }
+
+    let hasOrphanedMemories = false;
+    if (device_id) {
+      const orphanCheck = await db.query(
+        "SELECT 1 FROM memories WHERE device_id = $1 AND user_id IS NULL LIMIT 1",
+        [device_id]
+      );
+      hasOrphanedMemories = orphanCheck.rows.length > 0;
+    }
+
+    const token = signJwt(user.id, user.adult_verified);
+
+    return res.json({
+      ok: true,
+      token,
+      user: { id: user.id, username: user.username, email: user.email, adultVerified: user.adult_verified },
+      hasOrphanedMemories,
+    });
+  } catch (err) {
+    console.error("AUTH LOGIN ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Login failed." });
+  }
 });
 
 // -----------------------------------
