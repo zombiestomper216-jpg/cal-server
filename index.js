@@ -486,13 +486,14 @@ app.post("/auth", async (req, res) => {
   }
 
   try {
+    const loginId = String(username).toLowerCase();
     const result = await db.query(
-      "SELECT id, username, email, password_hash, adult_verified FROM users WHERE username = $1",
-      [String(username).toLowerCase()]
+      "SELECT id, username, email, password_hash, adult_verified FROM users WHERE username = $1 OR email = $1",
+      [loginId]
     );
 
     if (result.rows.length === 0) {
-      console.log("AUTH: no user found for username:", String(username).toLowerCase());
+      console.log("AUTH: no user found for username/email:", loginId);
       return res.status(401).json({ ok: false, error: "Invalid username or password." });
     }
 
@@ -609,13 +610,14 @@ app.post("/login", async (req, res) => {
       return res.status(503).json({ ok: false, error: "Auth not available." });
     }
 
+    const loginId = String(username).toLowerCase();
     const result = await db.query(
-      "SELECT id, username, email, password_hash, adult_verified FROM users WHERE username = $1",
-      [String(username).toLowerCase()]
+      "SELECT id, username, email, password_hash, adult_verified FROM users WHERE username = $1 OR email = $1",
+      [loginId]
     );
 
     if (result.rows.length === 0) {
-      console.log("AUTH: no user found for username:", String(username).toLowerCase());
+      console.log("AUTH: no user found for username/email:", loginId);
       return res.status(401).json({ ok: false, error: "Invalid username or password." });
     }
 
