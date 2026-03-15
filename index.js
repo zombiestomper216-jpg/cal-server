@@ -58,6 +58,28 @@ const db =
     : null;
 
 // -----------------------------------
+// DB Migrations (best-effort, never crashes)
+// -----------------------------------
+async function runMigrations() {
+  if (!db) return;
+  const migrations = [
+    `ALTER TABLE memories ADD COLUMN IF NOT EXISTS type VARCHAR DEFAULT NULL`,
+    `ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_referenced_at TIMESTAMP DEFAULT NULL`,
+    `UPDATE memories SET mode = 'all' WHERE mode IS NULL`,
+    `UPDATE memories SET type = 'preference' WHERE type IS NULL AND (key LIKE 'preferences_%' OR key LIKE 'dislikes_%' OR key LIKE 'identity_%' OR key LIKE 'activities_%' OR key LIKE 'boundaries_%')`,
+  ];
+  for (const sql of migrations) {
+    try {
+      await db.query(sql);
+    } catch (e) {
+      console.warn("[MIGRATION] Skipped:", sql.slice(0, 60), "—", e?.message || e);
+    }
+  }
+  console.log("[MIGRATION] Startup migrations complete.");
+}
+runMigrations();
+
+// -----------------------------------
 // JWT & Email Config
 // -----------------------------------
 const JWT_SECRET = process.env.JWT_SECRET || "";
@@ -136,6 +158,54 @@ function paceFromReq(reqBody) {
   return "NORMAL";
 }
 
+// -----------------------------------
+// Recurring Theme Tracker (in-memory, resets on restart)
+// -----------------------------------
+const recentTopics = new Map(); // device_id → Map<keyword, count>
+const COMMON_WORDS = new Set([
+  "that", "this", "with", "have", "from", "they", "been", "some", "what",
+  "when", "would", "about", "their", "them", "were", "said", "each", "just",
+  "like", "more", "other", "than", "then", "these", "into", "could", "over",
+  "also", "back", "after", "made", "many", "before", "much", "where", "most",
+  "should", "know", "think", "really", "going", "want", "yeah", "okay",
+  "sure", "well", "right", "here", "there", "doing", "being", "still",
+  "though", "thing", "things", "something", "anything", "everything",
+  "nothing", "someone", "anyone", "everyone", "because", "maybe", "pretty",
+  "very", "actually", "basically", "literally", "honestly", "kinda", "gonna",
+  "wanna", "gotta", "don't", "doesn't", "didn't", "wasn't", "weren't",
+  "isn't", "aren't", "can't", "won't", "hasn't", "haven't", "couldn't",
+]);
+
+function trackRecurringThemes(deviceId, userText) {
+  const words = userText.toLowerCase().match(/\b[a-z]{4,}\b/g) || [];
+  const meaningful = [...new Set(words.filter((w) => !COMMON_WORDS.has(w)))];
+
+  if (!recentTopics.has(deviceId)) recentTopics.set(deviceId, new Map());
+  const topicMap = recentTopics.get(deviceId);
+
+  // Cap per-device entries at 1000
+  if (topicMap.size > 1000) {
+    const keys = [...topicMap.keys()];
+    for (let i = 0; i < 200; i++) topicMap.delete(keys[i]);
+  }
+
+  const themes = [];
+  for (const word of meaningful) {
+    const count = (topicMap.get(word) || 0) + 1;
+    topicMap.set(word, count);
+    if (count === 3) {
+      themes.push({
+        category: "recurring_theme",
+        type: "recurring_theme",
+        key: `recurring_theme_${word}`,
+        value: `He keeps bringing up "${word}" — it seems important to him`,
+        confidence: "high",
+      });
+    }
+  }
+  return themes;
+}
+
 function buildSystemPrompt({ mode, pace, memories = [] }) {
   let basePrompt = "";
 
@@ -183,27 +253,66 @@ basePrompt = BROMO_SFW_SYSTEM_PROMPT_V2;  }
   return basePrompt;
 }
 
-// PHASE 4: Modular memory context builder (prep for Phase 5 semantic search)
-function buildMemoryContext(allMemories, mode, userText = "") {
+// Relevance decay penalty based on last_referenced_at / updated_at age
+function decayPenalty(memory) {
+  const ref = memory.last_referenced_at || memory.updated_at || memory.created_at;
+  if (!ref) return 0;
+  const ageDays = (Date.now() - new Date(ref).getTime()) / 86400000;
+  if (ageDays > 60) return -2;
+  if (ageDays > 30) return -1;
+  return 0;
+}
+
+// Emotional keywords used to detect emotional conversation tone
+const EMOTIONAL_TONE_KEYWORDS = [
+  "feel", "feeling", "felt", "struggling", "hurt", "scared", "lonely",
+  "grateful", "happy", "depressed", "anxious", "stressed", "overwhelmed",
+  "proud", "ashamed", "heartbroken", "grief", "loss", "hopeless", "hopeful",
+];
+
+// Selective memory recall: strict mode scoping, relevance scoring, decay, 3-5 max
+function buildMemoryContext(allMemories, mode, messages = []) {
   if (!allMemories || allMemories.length === 0) return [];
 
-  // Filter by mode
-  const filtered = allMemories.filter((m) => !m.mode || m.mode === mode || m.mode === null);
+  // Strict mode scoping: only matching mode or 'all'
+  const filtered = allMemories.filter((m) => m.mode === mode || m.mode === "all");
 
-  // Extract simple keywords from user message
+  // Extract keywords from last 3 user messages for broader context
+  const recentUserTexts = (Array.isArray(messages) ? messages : [])
+    .filter((m) => m?.role === "user" && typeof m.content === "string")
+    .slice(-3)
+    .map((m) => m.content);
+  const combinedText = recentUserTexts.join(" ");
+
   const userTerms = new Set(
-    String(userText || "")
-      .toLowerCase()
-      .match(/\b[a-z]{4,}\b/g) || []
+    combinedText.toLowerCase().match(/\b[a-z]{4,}\b/g) || []
   );
+
+  // Detect emotional conversation tone
+  const lowerCombined = combinedText.toLowerCase();
+  const isEmotional = EMOTIONAL_TONE_KEYWORDS.some((kw) => lowerCombined.includes(kw));
 
   function relevance(memory) {
     const text = String(memory?.value || "").toLowerCase();
     let score = 0;
 
+    // Keyword overlap
     for (const term of userTerms) {
       if (text.includes(term)) score += 1;
     }
+
+    // Emotional tone boost
+    if (isEmotional && memory.type === "emotional_moment") score += 2;
+
+    // Recency bonus (last 30 days)
+    const ref = memory.last_referenced_at || memory.updated_at || memory.created_at;
+    if (ref) {
+      const ageDays = (Date.now() - new Date(ref).getTime()) / 86400000;
+      if (ageDays < 30) score += 1;
+    }
+
+    // Decay penalty (>30d: -1, >60d: -2)
+    score += decayPenalty(memory);
 
     return score;
   }
@@ -212,19 +321,18 @@ function buildMemoryContext(allMemories, mode, userText = "") {
     const relA = relevance(a);
     const relB = relevance(b);
 
-    // 1️⃣ relevance to current message
     if (relA !== relB) return relB - relA;
 
-    // 2️⃣ high confidence
+    // Prefer high confidence
     if (a.confidence === "high" && b.confidence !== "high") return -1;
     if (b.confidence === "high" && a.confidence !== "high") return 1;
 
-    // 3️⃣ recency
+    // Recency tiebreaker
     return new Date(b.updated_at) - new Date(a.updated_at);
   });
 
-  // Reduce prompt bloat (50 → 12)
-  return sorted.slice(0, 12);
+  // Selective recall: 3-5 memories max
+  return sorted.slice(0, 5);
 }
 
 function isNsfwPatchApplied({ mode, pace }) {
@@ -860,6 +968,24 @@ const IDENTITY_STOPWORDS = [
 ];
 
 /**
+ * Emotional stopwords — transient states that shouldn't become emotional_moment memories
+ */
+const EMOTIONAL_STOPWORDS = [
+  "tired", "exhausted", "sleepy", "bored", "hungry", "thirsty",
+  "full", "stuffed", "fine", "okay", "ok", "good", "bad", "meh",
+  "weird", "off", "sick", "ill", "better", "worse",
+];
+
+/**
+ * Map detection category → memory type
+ */
+function typeFromCategory(category) {
+  if (category === "emotional_moment") return "emotional_moment";
+  if (category === "recurring_theme") return "recurring_theme";
+  return "preference";
+}
+
+/**
  * PHASE 4: Hardened patterns with better identity detection
  */
 const MEMORY_PATTERNS = {
@@ -886,6 +1012,11 @@ const MEMORY_PATTERNS = {
   boundaries: [
     /\bnever\s+(?:call me|say|use|mention|bring up)\s+(.+?)(?:\.|,|!|$)/i,
     /\bdon't\s+(?:ever\s+)?(?:mention|bring up|talk about|ask about)\s+(.+?)(?:\.|,|!|$)/i,
+  ],
+  emotional_moment: [
+    /\b(?:i feel|i'm feeling|i felt)\s+(?:really\s+)?(.+?)(?:\.|,|!|$)/i,
+    /\b(?:i've been|i was)\s+(?:struggling|dealing|coping)\s+(?:with\s+)?(.+?)(?:\.|,|!|$)/i,
+    /\b(?:it really)\s+(?:hurt|helped|meant a lot|affected me)(.*)(?:\.|,|!|$)/i,
   ],
 };
 
@@ -952,6 +1083,16 @@ if (
           }
         }
 
+        // Filter transient emotional states from emotional_moment captures
+        if (category === "emotional_moment") {
+          if (EMOTIONAL_STOPWORDS.some((word) => lowerValue === word || lowerValue.includes(word))) {
+            if (DEBUG_CHAT) {
+              console.log(`[DETECT] Skipping emotional stopword: "${value}"`);
+            }
+            continue;
+          }
+        }
+
         // Generate a key based on category and content
         const key = `${category}_${value.toLowerCase().replace(/\s+/g, "_").substring(0, 30)}`;
 
@@ -959,6 +1100,7 @@ if (
           category,
           key,
           value: formatMemoryValue(category, value),
+          type: typeFromCategory(category),
           confidence: "low", // User-confirmed memories upgrade to 'high'
           matchedPattern: pattern.source,
         });
@@ -984,6 +1126,8 @@ function formatMemoryValue(category, rawValue) {
       return `He's ${rawValue}`;
     case "boundaries":
       return `Don't ${rawValue}`;
+    case "emotional_moment":
+      return `He shared that he's been ${rawValue}`;
     default:
       return rawValue;
   }
@@ -1083,9 +1227,20 @@ app.post("/chat", requireAuth, async (req, res) => {
       });
     }
 
-    const filteredMemories = buildMemoryContext(memories, mode, userText);
+    const filteredMemories = buildMemoryContext(memories, mode, messages);
     const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories });
     const patchApplied = isNsfwPatchApplied({ mode, pace });
+
+    // Update last_referenced_at for injected memories (fire-and-forget)
+    if (db && filteredMemories.length > 0) {
+      const ids = filteredMemories.map((m) => m.id).filter(Boolean);
+      if (ids.length > 0) {
+        db.query(
+          `UPDATE memories SET last_referenced_at = NOW() WHERE id = ANY($1::int[])`,
+          [ids]
+        ).catch((e) => console.warn("[MEMORY] last_referenced_at update failed:", e?.message));
+      }
+    }
 
     const temperature =
       mode === "NSFW"
@@ -1180,6 +1335,36 @@ app.post("/chat", requireAuth, async (req, res) => {
       } catch (e) {
         console.warn("DB insert failed:", e?.message || e);
       }
+    }
+
+    // Auto-detect and save memories (fire-and-forget, never blocks response)
+    const chatDeviceId = req.body.device_id || null;
+    const chatUserId = req.userId || null;
+    if (db && userText.trim() && (chatDeviceId || chatUserId) && shouldTriggerDetection(messages)) {
+      (async () => {
+        try {
+          const detected = detectMemoriesHeuristic(userText);
+          const recurring = chatDeviceId ? trackRecurringThemes(chatDeviceId, userText) : [];
+          const allDetected = [...detected, ...recurring];
+
+          for (const mem of allDetected) {
+            const effectiveDeviceId = chatDeviceId || `user_${chatUserId}`;
+            await db.query(
+              `INSERT INTO memories (device_id, key, value, mode, confidence, type, user_id)
+               VALUES ($1, $2, $3, $4, 'high', $5, $6)
+               ON CONFLICT (device_id, key)
+               DO UPDATE SET value = $3, mode = $4, type = COALESCE($5, memories.type),
+                            user_id = COALESCE($6, memories.user_id), updated_at = NOW()`,
+              [effectiveDeviceId, mem.key, mem.value, mode, mem.type || typeFromCategory(mem.category), chatUserId]
+            );
+          }
+          if (DEBUG_CHAT && allDetected.length > 0) {
+            console.log(`[AUTO-DETECT] Saved ${allDetected.length} memories for ${chatDeviceId || chatUserId}`);
+          }
+        } catch (e) {
+          console.warn("[AUTO-DETECT] Failed:", e?.message || e);
+        }
+      })();
     }
 
     return res.json({ ok: true, reply });
@@ -1296,7 +1481,7 @@ app.get("/memories", requireAuth, async (req, res) => {
 
     if (mode) {
       params.push(mode);
-      query += ` AND (mode = $${params.length} OR mode IS NULL)`;
+      query += ` AND (mode = $${params.length} OR mode = 'all')`;
     }
 
     query += " ORDER BY created_at DESC";
@@ -1316,7 +1501,7 @@ app.get("/memories", requireAuth, async (req, res) => {
 // POST /memories - Create a new memory
 app.post("/memories", requireAuth, async (req, res) => {
   try {
-    const { device_id, key, value, mode = null } = req.body;
+    const { device_id, key, value, mode = "all", type = null } = req.body;
 
     if (!device_id || !key || !value) {
       return res.status(400).json({
@@ -1331,12 +1516,13 @@ app.post("/memories", requireAuth, async (req, res) => {
 
     const userId = req.userId || null;
     const result = await db.query(
-      `INSERT INTO memories (device_id, key, value, mode, confidence, user_id)
-       VALUES ($1, $2, $3, $4, 'high', $5)
+      `INSERT INTO memories (device_id, key, value, mode, confidence, type, user_id)
+       VALUES ($1, $2, $3, $4, 'high', $5, $6)
        ON CONFLICT (device_id, key)
-       DO UPDATE SET value = $3, mode = $4, user_id = COALESCE($5, memories.user_id), updated_at = NOW()
+       DO UPDATE SET value = $3, mode = $4, type = COALESCE($5, memories.type),
+                    user_id = COALESCE($6, memories.user_id), updated_at = NOW()
        RETURNING *`,
-      [device_id, key, value, mode, userId]
+      [device_id, key, value, mode, type, userId]
     );
 
     return res.json({
