@@ -37,6 +37,14 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
+const SESSION_SUMMARY_PROMPT = `You are generating a session continuity summary for an AI companion.
+Capture in under 150 words:
+- The emotional tone of the conversation
+- Main topics discussed
+- Any personal disclosures (name, job, situation, preferences)
+- Where the conversation left off (unfinished threads, last topic)
+Write in third person ("He mentioned...", "They discussed..."). Be factual and concise.`;
+
 // -----------------------------------
 // Postgres
 // -----------------------------------
@@ -67,6 +75,16 @@ async function runMigrations() {
     `ALTER TABLE memories ADD COLUMN IF NOT EXISTS last_referenced_at TIMESTAMP DEFAULT NULL`,
     `UPDATE memories SET mode = 'all' WHERE mode IS NULL`,
     `UPDATE memories SET type = 'preference' WHERE type IS NULL AND (key LIKE 'preferences_%' OR key LIKE 'dislikes_%' OR key LIKE 'identity_%' OR key LIKE 'activities_%' OR key LIKE 'boundaries_%')`,
+    `CREATE TABLE IF NOT EXISTS session_summaries (
+      id SERIAL PRIMARY KEY,
+      device_id VARCHAR,
+      user_id INTEGER,
+      mode VARCHAR NOT NULL DEFAULT 'SFW',
+      summary TEXT NOT NULL,
+      created_at TIMESTAMP DEFAULT NOW()
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_session_summaries_device ON session_summaries (device_id, created_at DESC)`,
+    `CREATE INDEX IF NOT EXISTS idx_session_summaries_user ON session_summaries (user_id, created_at DESC)`,
   ];
   for (const sql of migrations) {
     try {
@@ -206,7 +224,7 @@ function trackRecurringThemes(deviceId, userText) {
   return themes;
 }
 
-function buildSystemPrompt({ mode, pace, memories = [] }) {
+function buildSystemPrompt({ mode, pace, memories = [], lastSessionSummary = null }) {
   let basePrompt = "";
 
   if (mode === "NSFW") {
@@ -217,6 +235,11 @@ function buildSystemPrompt({ mode, pace, memories = [] }) {
     }
   } else {
 basePrompt = BROMO_SFW_SYSTEM_PROMPT_V2;  }
+
+  // Inject last session summary (before memories, never announced)
+  if (lastSessionSummary) {
+    basePrompt += `\n\nLast session: ${lastSessionSummary}`;
+  }
 
   // PHASE 4: Natural memory injection (limit to 50 max, prioritize recent)
   if (memories && memories.length > 0) {
@@ -1227,8 +1250,30 @@ app.post("/chat", requireAuth, async (req, res) => {
       });
     }
 
+    // Fetch last session summary for continuity (best-effort)
+    let lastSessionSummary = req.body.sessionSummary || null;
+    if (!lastSessionSummary && db) {
+      try {
+        const deviceId = req.body.device_id || null;
+        const userId = req.userId || null;
+        if (deviceId || userId) {
+          const ssResult = await db.query(
+            `SELECT summary FROM session_summaries
+             WHERE (device_id = $1 OR user_id = $2) AND mode = $3
+             ORDER BY created_at DESC LIMIT 1`,
+            [deviceId, userId, mode]
+          );
+          if (ssResult.rows.length > 0) {
+            lastSessionSummary = ssResult.rows[0].summary;
+          }
+        }
+      } catch (e) {
+        console.warn("[SESSION] Summary fetch failed:", e?.message);
+      }
+    }
+
     const filteredMemories = buildMemoryContext(memories, mode, messages);
-    const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories });
+    const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary });
     const patchApplied = isNsfwPatchApplied({ mode, pace });
 
     // Update last_referenced_at for injected memories (fire-and-forget)
@@ -1442,6 +1487,99 @@ Keep it brief and factual. This will be used as context for future messages. ${m
     return res.status(500).json({ ok: false, error: "Summarization failed" });
   }
 });
+
+// -----------------------------------
+// Session Summary Endpoints
+// -----------------------------------
+
+// POST /session-summary — generate and store a session continuity summary
+app.post("/session-summary", requireAuth, async (req, res) => {
+  try {
+    const { messages = [], mode = "SFW", device_id } = req.body;
+    const userId = req.userId || null;
+    const deviceId = device_id || null;
+
+    if (!deviceId && !userId) {
+      return res.status(400).json({ ok: false, error: "device_id required" });
+    }
+
+    if (!messages.length) {
+      return res.status(400).json({ ok: false, error: "messages required" });
+    }
+
+    const conversationText = messages
+      .map((m) => {
+        const speaker = m.role === "user" ? "User" : "Bromo";
+        return `${speaker}: ${m.content}`;
+      })
+      .join("\n\n");
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4.1",
+      messages: [
+        { role: "system", content: SESSION_SUMMARY_PROMPT },
+        { role: "user", content: conversationText },
+      ],
+      temperature: 0.3,
+      max_tokens: 200,
+    });
+
+    const summary = completion.choices?.[0]?.message?.content?.trim() || "";
+
+    // Store in DB (best-effort)
+    if (db && summary) {
+      try {
+        await db.query(
+          `INSERT INTO session_summaries (device_id, user_id, mode, summary)
+           VALUES ($1, $2, $3, $4)`,
+          [deviceId, userId, mode, summary]
+        );
+      } catch (e) {
+        console.warn("[SESSION] Summary store failed:", e?.message);
+      }
+    }
+
+    return res.json({ ok: true, summary });
+  } catch (err) {
+    console.error("SESSION SUMMARY ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Session summary generation failed" });
+  }
+});
+
+// DELETE /session-summary — clear stored session summaries (Start Fresh)
+app.delete("/session-summary", requireAuth, async (req, res) => {
+  try {
+    const deviceId = req.body.device_id || req.query.device_id || null;
+    const userId = req.userId || null;
+
+    if (!deviceId && !userId) {
+      return res.status(400).json({ ok: false, error: "device_id required" });
+    }
+
+    if (db) {
+      const conditions = [];
+      const params = [];
+      if (deviceId) {
+        params.push(deviceId);
+        conditions.push(`device_id = $${params.length}`);
+      }
+      if (userId) {
+        params.push(userId);
+        conditions.push(`user_id = $${params.length}`);
+      }
+      await db.query(
+        `DELETE FROM session_summaries WHERE ${conditions.join(" OR ")}`,
+        params
+      );
+    }
+
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("SESSION SUMMARY DELETE ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Failed to clear session summaries" });
+  }
+});
+
 // -----------------------------------
 // Memory Endpoints (Phase 2)
 // -----------------------------------
