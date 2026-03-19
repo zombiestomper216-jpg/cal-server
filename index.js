@@ -85,6 +85,27 @@ async function runMigrations() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_session_summaries_device ON session_summaries (device_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_session_summaries_user ON session_summaries (user_id, created_at DESC)`,
+    // Re-engagement system tables
+    `CREATE TABLE IF NOT EXISTS user_activity (
+      id SERIAL PRIMARY KEY,
+      device_id VARCHAR,
+      user_id INTEGER,
+      mode VARCHAR NOT NULL DEFAULT 'SFW',
+      last_active_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      UNIQUE (device_id, user_id)
+    )`,
+    `CREATE TABLE IF NOT EXISTS re_engagement_messages (
+      id SERIAL PRIMARY KEY,
+      device_id VARCHAR,
+      user_id INTEGER,
+      mode VARCHAR NOT NULL DEFAULT 'SFW',
+      content TEXT NOT NULL,
+      generated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+      delivered BOOLEAN NOT NULL DEFAULT FALSE,
+      delivered_at TIMESTAMP,
+      response_received BOOLEAN NOT NULL DEFAULT FALSE
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_re_engagement_pending ON re_engagement_messages (device_id, user_id, delivered, generated_at DESC)`,
   ];
   for (const sql of migrations) {
     try {
@@ -1382,9 +1403,32 @@ app.post("/chat", requireAuth, async (req, res) => {
       }
     }
 
-    // Auto-detect and save memories (fire-and-forget, never blocks response)
+    // Activity tracking for re-engagement (fire-and-forget)
     const chatDeviceId = req.body.device_id || null;
     const chatUserId = req.userId || null;
+    if (db && (chatDeviceId || chatUserId)) {
+      db.query(
+        `INSERT INTO user_activity (device_id, user_id, mode, last_active_at)
+         VALUES ($1, $2, $3, NOW())
+         ON CONFLICT (device_id, user_id)
+         DO UPDATE SET last_active_at = NOW(), mode = $3`,
+        [chatDeviceId, chatUserId, mode]
+      ).catch(e => console.warn("[ACTIVITY] Track failed:", e?.message));
+
+      // Mark any pending re-engagement as responded to
+      db.query(
+        `UPDATE re_engagement_messages SET response_received = TRUE
+         WHERE id = (
+           SELECT id FROM re_engagement_messages
+           WHERE (device_id = $1 OR user_id = $2)
+             AND delivered = TRUE AND response_received = FALSE
+           ORDER BY generated_at DESC LIMIT 1
+         )`,
+        [chatDeviceId, chatUserId]
+      ).catch(e => console.warn("[RE-ENGAGE] Response mark failed:", e?.message));
+    }
+
+    // Auto-detect and save memories (fire-and-forget, never blocks response)
     if (db && userText.trim() && (chatDeviceId || chatUserId) && shouldTriggerDetection(messages)) {
       (async () => {
         try {
@@ -1988,6 +2032,210 @@ app.post("/detect-memory", requireAuth, async (req, res) => {
     return res.status(500).json({ ok: false, error: "Detection failed" });
   }
 });
+// -----------------------------------
+// Re-Engagement System
+// -----------------------------------
+const RE_ENGAGEMENT_INTERVAL_MS = 30 * 60 * 1000; // Check every 30 minutes
+const RE_ENGAGEMENT_INACTIVITY_HOURS = 48;
+const RE_ENGAGEMENT_MAX_UNANSWERED = 3;
+
+async function generateReEngagement(deviceId, userId, mode) {
+  // 1. Fetch high-confidence memories
+  let memories = [];
+  try {
+    const memResult = await db.query(
+      `SELECT * FROM memories
+       WHERE (device_id = $1 OR user_id = $2)
+         AND confidence = 'high'
+       ORDER BY updated_at DESC`,
+      [deviceId, userId]
+    );
+    memories = memResult.rows;
+  } catch (e) {
+    console.warn("[RE-ENGAGE] Memory fetch failed:", e?.message);
+  }
+
+  // 2. Fetch last session summary
+  let lastSessionSummary = null;
+  try {
+    const ssResult = await db.query(
+      `SELECT summary FROM session_summaries
+       WHERE (device_id = $1 OR user_id = $2) AND mode = $3
+       ORDER BY created_at DESC LIMIT 1`,
+      [deviceId, userId, mode]
+    );
+    if (ssResult.rows.length > 0) lastSessionSummary = ssResult.rows[0].summary;
+  } catch (e) {
+    console.warn("[RE-ENGAGE] Summary fetch failed:", e?.message);
+  }
+
+  // 3. Count unanswered previous re-engagements (for tone variation)
+  let unansweredCount = 0;
+  try {
+    const prevResult = await db.query(
+      `SELECT COUNT(*) as cnt FROM re_engagement_messages
+       WHERE (device_id = $1 OR user_id = $2)
+         AND response_received = FALSE`,
+      [deviceId, userId]
+    );
+    unansweredCount = parseInt(prevResult.rows[0]?.cnt || "0", 10);
+  } catch (e) { /* ignore */ }
+
+  // Hard cutoff: stop trying after too many unanswered
+  if (unansweredCount >= RE_ENGAGEMENT_MAX_UNANSWERED) {
+    if (DEBUG_CHAT) console.log("[RE-ENGAGE] Skipping — max unanswered reached for", deviceId || userId);
+    return;
+  }
+
+  // 4. Build system prompt (always SLOW_BURN pace for re-engagement)
+  const filteredMemories = buildMemoryContext(memories, mode, []);
+  const baseSystemPrompt = buildSystemPrompt({
+    mode,
+    pace: "SLOW_BURN",
+    memories: filteredMemories,
+    lastSessionSummary,
+  });
+
+  // 5. Tone-varying instruction based on unanswered count
+  let reEngageInstruction;
+  if (unansweredCount === 0) {
+    reEngageInstruction = `Generate a single short message from Bromo reaching out to the user unprompted. It should feel natural, not like a notification. It can reference something from memory or the last conversation if relevant. Keep it to 1-2 sentences maximum. Do not start with the user's name. Do not announce that time has passed.`;
+  } else if (unansweredCount === 1) {
+    reEngageInstruction = `Generate a single short message from Bromo reaching out again. Keep it even lighter — a single sentence, maybe a casual observation or a dry joke. No pressure. Don't reference any previous unanswered message. Do not start with the user's name.`;
+  } else {
+    reEngageInstruction = `Generate a very brief one-sentence message from Bromo. Something offhand and low-pressure. This is a gentle last check-in. Do not start with the user's name. Do not be heavy or guilt-trippy.`;
+  }
+
+  const systemPrompt = baseSystemPrompt + `\n\n[INTERNAL — RE-ENGAGEMENT]\n${reEngageInstruction}`;
+
+  // 6. Generate via OpenAI
+  const completion = await openai.chat.completions.create({
+    model: "gpt-4.1",
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: "[System: generate a re-engagement message for this user]" },
+    ],
+    temperature: 0.85,
+    max_tokens: 150,
+  });
+
+  const content = completion.choices?.[0]?.message?.content?.trim();
+  if (!content) return;
+
+  // 7. Store in DB
+  await db.query(
+    `INSERT INTO re_engagement_messages (device_id, user_id, mode, content)
+     VALUES ($1, $2, $3, $4)`,
+    [deviceId, userId, mode, content]
+  );
+
+  console.log("[RE-ENGAGE] Generated for", deviceId || `user:${userId}`, ":", content.slice(0, 60));
+}
+
+async function checkReEngagement() {
+  if (!db) return;
+  try {
+    const result = await db.query(`
+      SELECT ua.device_id, ua.user_id, ua.mode
+      FROM user_activity ua
+      WHERE ua.last_active_at < NOW() - INTERVAL '${RE_ENGAGEMENT_INACTIVITY_HOURS} hours'
+        AND ua.last_active_at > NOW() - INTERVAL '30 days'
+        AND NOT EXISTS (
+          SELECT 1 FROM re_engagement_messages rem
+          WHERE (rem.device_id = ua.device_id OR rem.user_id = ua.user_id)
+            AND rem.generated_at > NOW() - INTERVAL '${RE_ENGAGEMENT_INACTIVITY_HOURS} hours'
+        )
+      LIMIT 10
+    `);
+
+    for (const row of result.rows) {
+      try {
+        await generateReEngagement(row.device_id, row.user_id, row.mode);
+      } catch (e) {
+        console.warn("[RE-ENGAGE] Generation failed for", row.device_id || row.user_id, ":", e?.message);
+      }
+    }
+
+    if (DEBUG_CHAT && result.rows.length > 0) {
+      console.log(`[RE-ENGAGE] Processed ${result.rows.length} users this cycle`);
+    }
+  } catch (e) {
+    console.warn("[RE-ENGAGE] Check cycle failed:", e?.message);
+  }
+}
+
+// Start the periodic re-engagement check
+if (db) {
+  setInterval(checkReEngagement, RE_ENGAGEMENT_INTERVAL_MS);
+  console.log("[RE-ENGAGE] Scheduler started (every 30 min)");
+}
+
+// -----------------------------------
+// Re-Engagement Endpoints
+// -----------------------------------
+
+// Fetch pending re-engagement message (client calls on app open)
+app.get("/reengagement", requireAuth, async (req, res) => {
+  try {
+    const deviceId = req.query.device_id || null;
+    const mode = req.query.mode || "SFW";
+    const userId = req.userId || null;
+
+    if (!deviceId && !userId) {
+      return res.status(400).json({ ok: false, error: "device_id required" });
+    }
+    if (!db) {
+      return res.json({ ok: true, reengagement: null });
+    }
+
+    const conditions = [];
+    const params = [];
+    if (deviceId) { params.push(deviceId); conditions.push(`device_id = $${params.length}`); }
+    if (userId) { params.push(userId); conditions.push(`user_id = $${params.length}`); }
+    params.push(mode);
+    const modeParam = `$${params.length}`;
+
+    const result = await db.query(
+      `SELECT id, content FROM re_engagement_messages
+       WHERE (${conditions.join(" OR ")}) AND delivered = FALSE AND mode = ${modeParam}
+       ORDER BY generated_at DESC LIMIT 1`,
+      params
+    );
+
+    if (result.rows.length === 0) {
+      return res.json({ ok: true, reengagement: null });
+    }
+
+    const msg = result.rows[0];
+    return res.json({
+      ok: true,
+      reengagement: {
+        id: msg.id,
+        message: msg.content,
+      },
+    });
+  } catch (err) {
+    console.error("GET /reengagement error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to fetch re-engagement" });
+  }
+});
+
+// Mark re-engagement message as delivered (client calls after displaying it)
+app.post("/reengagement/:id/delivered", requireAuth, async (req, res) => {
+  try {
+    if (!db) return res.json({ ok: true });
+
+    await db.query(
+      `UPDATE re_engagement_messages SET delivered = TRUE, delivered_at = NOW() WHERE id = $1`,
+      [req.params.id]
+    );
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("POST /reengagement delivered error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to mark delivered" });
+  }
+});
+
 // -----------------------------------
 // Start Server (Railway expects process.env.PORT)
 // -----------------------------------
