@@ -1,6 +1,7 @@
 # Secrets
 .env
 .env.*
+auth.json
 
 # Node
 node_modules/

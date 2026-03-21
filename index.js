@@ -6,6 +6,9 @@ import OpenAI from "openai";
 import pg from "pg";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
+import crypto from "crypto";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
 import { Resend } from "resend";
 
 import {
@@ -21,6 +24,34 @@ const { Pool } = pg;
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.use(helmet());
+
+// --- Rate Limiting ---
+const generalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "Too many requests, please try again later." },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 10,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "Too many authentication attempts, please try again later." },
+});
+
+const chatLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { ok: false, error: "Too many requests, please slow down." },
+});
+
+app.use(generalLimiter);
 
 // Toggle verbose debug without code changes (set on Railway)
 const DEBUG_CHAT = String(process.env.DEBUG_CHAT || "").toLowerCase() === "true";
@@ -200,6 +231,9 @@ runMigrations();
 // JWT & Email Config
 // -----------------------------------
 const JWT_SECRET = process.env.JWT_SECRET || "";
+if (!JWT_SECRET) {
+  console.warn("WARNING: JWT_SECRET is not set. JWT authentication will be disabled.");
+}
 const BCRYPT_ROUNDS = 12;
 
 const resend = process.env.RESEND_API_KEY
@@ -353,7 +387,12 @@ basePrompt = BROMO_SFW_SYSTEM_PROMPT_V2;  }
     // Convert to natural, relational language
     const memoryLines = limitedMemories
       .map((m) => {
-        let value = m.value;
+        let value = String(m.value || "").slice(0, 200);
+
+        // Strip content that looks like prompt injection
+        if (/^(system|assistant|ignore|forget|disregard|override|you are now)\s*:/i.test(value)) {
+          return null;
+        }
 
         // Transform "User X" → "He X" for natural tone
         value = value.replace(/^User (likes?|dislikes?|is|enjoys?|prefers?)/i, (match, verb) => {
@@ -371,6 +410,7 @@ basePrompt = BROMO_SFW_SYSTEM_PROMPT_V2;  }
 
         return `- ${value}`;
       })
+      .filter(Boolean)
       .join("\n");
 
     // PHASE 4: Natural header instead of "REMEMBERED FACTS"
@@ -559,7 +599,7 @@ const TESTER_CODES = new Set(csvEnv("TESTER_CODES").map((c) => c.toUpperCase()))
 const TESTER_ADULT_CODES = new Set(csvEnv("TESTER_ADULT_CODES").map((c) => c.toUpperCase()));
 
 function makeSessionToken(prefix) {
-  return `${prefix}.${Date.now()}.${Math.random().toString(36).slice(2, 10)}`;
+  return `${prefix}.${Date.now()}.${crypto.randomBytes(8).toString("hex")}`;
 }
 
 function signJwt(userId, adultVerified) {
@@ -680,7 +720,7 @@ function requireAuth(req, res, next) {
   return res.status(401).json({ ok: false, error: "Invalid or expired token." });
 }
 
-app.post("/auth", async (req, res) => {
+app.post("/auth", authLimiter, async (req, res) => {
   const body = req.body || {};
 
   // New path: tester code
@@ -786,7 +826,7 @@ app.post("/auth", async (req, res) => {
 // User Auth Endpoints
 // -----------------------------------
 
-app.post("/signup", async (req, res) => {
+app.post("/signup", authLimiter, async (req, res) => {
   try {
     const { username, email, password } = req.body || {};
 
@@ -845,7 +885,7 @@ app.post("/signup", async (req, res) => {
   }
 });
 
-app.post("/login", async (req, res) => {
+app.post("/login", authLimiter, async (req, res) => {
   try {
     const { username, password, device_id } = req.body || {};
 
@@ -915,7 +955,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
-app.post("/forgot-password", async (req, res) => {
+app.post("/forgot-password", authLimiter, async (req, res) => {
   const genericResponse = { ok: true, message: "If that email is registered, a reset link has been sent." };
 
   try {
@@ -987,7 +1027,7 @@ app.get("/reset-password", (req, res) => {
 </body></html>`);
 });
 
-app.post("/reset-password", async (req, res) => {
+app.post("/reset-password", authLimiter, async (req, res) => {
   try {
     const { token, password } = req.body || {};
 
@@ -1300,7 +1340,7 @@ function dedupeDetectedMemories(memories) {
 // -----------------------------------
 // Chat Endpoint
 // -----------------------------------
-app.post("/chat", requireAuth, async (req, res) => {
+app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
   try {
     const { messages = [], mode = "SFW", threadSummary = null, recentMessages = [], memories = [] } =
       req.body;
@@ -1556,9 +1596,17 @@ app.post("/chat", requireAuth, async (req, res) => {
 // -----------------------------------
 // Summarize Endpoint
 // -----------------------------------
-app.post("/summarize", requireAuth, async (req, res) => {
+app.post("/summarize", chatLimiter, requireAuth, async (req, res) => {
   try {
     const { messages = [], mode = "SFW" } = req.body;
+
+    if (mode === "NSFW" && !isAdultVerifiedToken(req)) {
+      return res.json({
+        ok: true,
+        blocked: true,
+        reason: "adult_verification_required",
+      });
+    }
 
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({
@@ -1633,6 +1681,14 @@ app.post("/session-summary", requireAuth, async (req, res) => {
     const { messages = [], mode = "SFW", device_id } = req.body;
     const userId = req.userId || null;
     const deviceId = device_id || null;
+
+    if (mode === "NSFW" && !isAdultVerifiedToken(req)) {
+      return res.json({
+        ok: true,
+        blocked: true,
+        reason: "adult_verification_required",
+      });
+    }
 
     if (!deviceId && !userId) {
       return res.status(400).json({ ok: false, error: "device_id required" });
