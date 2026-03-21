@@ -31,7 +31,85 @@ console.log("BOOT env check:", {
   hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
   hasJwtSecret: Boolean(process.env.JWT_SECRET),
   hasResend: Boolean(process.env.RESEND_API_KEY),
+  hasWeatherKey: Boolean(process.env.OPENWEATHER_API_KEY),
 });
+
+// -----------------------------------
+// Chicago Weather (OpenWeatherMap)
+// -----------------------------------
+let weatherCache = { data: null, fetchedAt: 0 };
+const WEATHER_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+const WEATHER_FETCH_TIMEOUT = 3000; // 3 seconds
+
+async function fetchChicagoWeather() {
+  const now = Date.now();
+  if (weatherCache.data && (now - weatherCache.fetchedAt) < WEATHER_CACHE_TTL) {
+    return weatherCache.data;
+  }
+
+  const apiKey = process.env.OPENWEATHER_API_KEY;
+  if (!apiKey) return null;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), WEATHER_FETCH_TIMEOUT);
+
+    const res = await fetch(
+      `https://api.openweathermap.org/data/2.5/weather?lat=41.8781&lon=-87.6298&units=imperial&appid=${apiKey}`,
+      { signal: controller.signal }
+    );
+    clearTimeout(timeoutId);
+
+    if (!res.ok) throw new Error(`Weather API ${res.status}`);
+    const json = await res.json();
+
+    const condition = json.weather?.[0]?.description || "unknown";
+    const temp = Math.round(json.main?.temp);
+    const feelsLike = Math.round(json.main?.feels_like);
+
+    const data = { condition, temp, feelsLike };
+    weatherCache = { data, fetchedAt: now };
+    return data;
+  } catch (e) {
+    console.warn("[WEATHER] Fetch failed:", e?.message);
+    return weatherCache.data || null;
+  }
+}
+
+// -----------------------------------
+// Real-Time Context (Time/Date/Weather)
+// -----------------------------------
+function buildRealtimeContext(weather) {
+  const now = new Date();
+  const tz = { timeZone: "America/Chicago" };
+
+  const dayOfWeek = now.toLocaleDateString("en-US", { ...tz, weekday: "long" });
+  const dateStr = now.toLocaleDateString("en-US", { ...tz, month: "long", day: "numeric", year: "numeric" });
+  const hour = parseInt(now.toLocaleTimeString("en-US", { ...tz, hour: "numeric", hour12: false }), 10);
+
+  let timeOfDay;
+  if (hour >= 5 && hour < 12) timeOfDay = "Morning";
+  else if (hour >= 12 && hour < 17) timeOfDay = "Afternoon";
+  else if (hour >= 17 && hour < 21) timeOfDay = "Evening";
+  else timeOfDay = "Late night";
+
+  const hourFormatted = now.toLocaleTimeString("en-US", { ...tz, hour: "numeric", minute: "2-digit", hour12: true });
+
+  const m = parseInt(now.toLocaleDateString("en-US", { ...tz, month: "numeric" }), 10);
+  let season;
+  if (m >= 3 && m <= 5) season = "Spring";
+  else if (m >= 6 && m <= 8) season = "Summer";
+  else if (m >= 9 && m <= 11) season = "Fall";
+  else season = "Winter";
+
+  let ctx = `Current context: ${dayOfWeek}, ${dateStr}. ${timeOfDay} — ${hourFormatted}. ${season}.`;
+
+  if (weather) {
+    ctx += ` Chicago weather: ${weather.condition}, ${weather.temp}°F, feels like ${weather.feelsLike}°F.`;
+  }
+
+  return ctx;
+}
 
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -245,7 +323,7 @@ function trackRecurringThemes(deviceId, userText) {
   return themes;
 }
 
-function buildSystemPrompt({ mode, pace, memories = [], lastSessionSummary = null }) {
+function buildSystemPrompt({ mode, pace, memories = [], lastSessionSummary = null, realtimeContext = null }) {
   let basePrompt = "";
 
   if (mode === "NSFW") {
@@ -256,6 +334,11 @@ function buildSystemPrompt({ mode, pace, memories = [], lastSessionSummary = nul
     }
   } else {
 basePrompt = BROMO_SFW_SYSTEM_PROMPT_V2;  }
+
+  // Inject real-time context (time, date, Chicago weather)
+  if (realtimeContext) {
+    basePrompt += `\n\n${realtimeContext}`;
+  }
 
   // Inject last session summary (before memories, never announced)
   if (lastSessionSummary) {
@@ -1223,6 +1306,9 @@ app.post("/chat", requireAuth, async (req, res) => {
       req.body;
     const pace = paceFromReq(req.body);
 
+    // Start weather fetch early (runs concurrently with DB queries)
+    const weatherPromise = fetchChicagoWeather();
+
     const userText = extractLastUserText(messages);
 
     // Never call OpenAI without a real user message.
@@ -1293,8 +1379,11 @@ app.post("/chat", requireAuth, async (req, res) => {
       }
     }
 
+    const weather = await weatherPromise;
+    const realtimeContext = buildRealtimeContext(weather);
+
     const filteredMemories = buildMemoryContext(memories, mode, messages);
-    const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary });
+    const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext });
     const patchApplied = isNsfwPatchApplied({ mode, pace });
 
     // Update last_referenced_at for injected memories (fire-and-forget)
@@ -1329,6 +1418,8 @@ app.post("/chat", requireAuth, async (req, res) => {
         roles: summarizeRoles(messages),
         userTextLen: userText.length,
         systemPromptLen: systemPrompt.length,
+        realtimeContext,
+        weatherCached: !!weatherCache.data,
         hasSummary: !!threadSummary,
         recentMessagesCount: recentMessages.length,
         memoriesCount: memories.length,
