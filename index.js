@@ -12,10 +12,11 @@ import rateLimit from "express-rate-limit";
 import { Resend } from "resend";
 
 import {
-  BROMO_SFW_SYSTEM_PROMPT_V2,
-  BROMO_NSFW_SYSTEM_PROMPT_V2,
-  NSFW_BEHAVIOR_PATCH,
+  CAL_SFW_SYSTEM_PROMPT,
+  AFTER_DARK_SYSTEM_PROMPT,
+  AFTER_DARK_BEHAVIOR_PATCH,
 } from "./prompts.js";
+import { sendMessageToCal } from "./cal.js";
 
 dotenv.config();
 
@@ -188,7 +189,7 @@ async function runMigrations() {
       id SERIAL PRIMARY KEY,
       device_id VARCHAR,
       user_id INTEGER,
-      mode VARCHAR NOT NULL DEFAULT 'SFW',
+      mode VARCHAR NOT NULL DEFAULT 'sfw',
       summary TEXT NOT NULL,
       created_at TIMESTAMP DEFAULT NOW()
     )`,
@@ -199,7 +200,7 @@ async function runMigrations() {
       id SERIAL PRIMARY KEY,
       device_id VARCHAR,
       user_id INTEGER,
-      mode VARCHAR NOT NULL DEFAULT 'SFW',
+      mode VARCHAR NOT NULL DEFAULT 'sfw',
       last_active_at TIMESTAMP NOT NULL DEFAULT NOW(),
       UNIQUE (device_id, user_id)
     )`,
@@ -207,7 +208,7 @@ async function runMigrations() {
       id SERIAL PRIMARY KEY,
       device_id VARCHAR,
       user_id INTEGER,
-      mode VARCHAR NOT NULL DEFAULT 'SFW',
+      mode VARCHAR NOT NULL DEFAULT 'sfw',
       content TEXT NOT NULL,
       generated_at TIMESTAMP NOT NULL DEFAULT NOW(),
       delivered BOOLEAN NOT NULL DEFAULT FALSE,
@@ -240,14 +241,14 @@ const resend = process.env.RESEND_API_KEY
   ? new Resend(process.env.RESEND_API_KEY)
   : null;
 
-const EMAIL_FROM = process.env.EMAIL_FROM || "Bromo <onboarding@resend.dev>";
+const EMAIL_FROM = process.env.EMAIL_FROM || "Cal <onboarding@resend.dev>";
 const APP_URL = process.env.APP_URL || "https://bromo-nsfw-production.up.railway.app";
 
 // -----------------------------------
 // Root
 // -----------------------------------
 app.get("/", (_req, res) => {
-  res.status(200).send("Bromo API is running");
+  res.status(200).send("Cal API is running");
 });
 
 // -----------------------------------
@@ -360,14 +361,14 @@ function trackRecurringThemes(deviceId, userText) {
 function buildSystemPrompt({ mode, pace, memories = [], lastSessionSummary = null, realtimeContext = null }) {
   let basePrompt = "";
 
-  if (mode === "NSFW") {
+  if (mode === "after_dark") {
     if (pace === "TURN_IT_UP" || pace === "AFTER_DARK") {
-      basePrompt = `${BROMO_NSFW_SYSTEM_PROMPT_V2}\n\n${NSFW_BEHAVIOR_PATCH}`;
+      basePrompt = `${AFTER_DARK_SYSTEM_PROMPT}\n\n${AFTER_DARK_BEHAVIOR_PATCH}`;
     } else {
-      basePrompt = BROMO_NSFW_SYSTEM_PROMPT_V2;
+      basePrompt = AFTER_DARK_SYSTEM_PROMPT;
     }
   } else {
-basePrompt = BROMO_SFW_SYSTEM_PROMPT_V2;  }
+basePrompt = CAL_SFW_SYSTEM_PROMPT;  }
 
   // Inject real-time context (time, date, Chicago weather)
   if (realtimeContext) {
@@ -503,7 +504,7 @@ function buildMemoryContext(allMemories, mode, messages = []) {
 }
 
 function isNsfwPatchApplied({ mode, pace }) {
-  return mode === "NSFW" && (pace === "TURN_IT_UP" || pace === "AFTER_DARK");
+  return mode === "after_dark" && (pace === "TURN_IT_UP" || pace === "AFTER_DARK");
 }
 
 function extractLastUserText(messages) {
@@ -526,7 +527,7 @@ function summarizeRoles(messages) {
 // Minimal post-gen guard to prevent curt default opener on early turns
 // Post-generation safety net for a known bad opener on the very first turn.
 // NOTE: This is a fallback only. Persona-level behavior should be defined in prompts.js,
-// not here. If Bromo's opener problem is resolved in the prompt, this can be removed.
+// not here. If Cal's opener problem is resolved in the prompt, this can be removed.
 function softenEarlySnap(reply, messages) {
   if (!Array.isArray(messages) || messages.length <= 1) {
     const r = String(reply || "").trim().toLowerCase();
@@ -605,7 +606,7 @@ function makeSessionToken(prefix) {
 function signJwt(userId, adultVerified) {
   if (!JWT_SECRET) throw new Error("JWT_SECRET not configured");
   return jwt.sign(
-    { sub: userId, capability: adultVerified ? "NSFW" : "SFW", adult: adultVerified },
+    { sub: userId, capability: adultVerified ? "after_dark" : "sfw", adult: adultVerified },
     JWT_SECRET,
     { expiresIn: "30d" }
   );
@@ -979,7 +980,7 @@ app.post("/forgot-password", authLimiter, async (req, res) => {
         await resend.emails.send({
           from: EMAIL_FROM,
           to: email,
-          subject: "Bromo — Password Reset",
+          subject: "Cal — Password Reset",
           text: `Reset your password: ${APP_URL}/reset-password?token=${resetToken}\n\nThis link expires in 1 hour.`,
           html: `<p>Reset your password:</p><p><a href="${APP_URL}/reset-password?token=${resetToken}">Click here</a></p><p>This link expires in 1 hour.</p>`,
         });
@@ -1007,16 +1008,16 @@ app.get("/reset-password", (req, res) => {
   res.send(`<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Bromo — Password Reset</title>
+<title>Cal — Password Reset</title>
 </head><body style="font-family:system-ui;text-align:center;padding:60px 20px">
-<h2>Opening Bromo...</h2>
+<h2>Opening Cal...</h2>
 <p><a href="${deepLink}" id="open-btn"
       style="display:inline-block;padding:14px 28px;background:#111;color:#fff;
              border-radius:8px;text-decoration:none;font-size:16px">
-  Open in Bromo
+  Open in Cal
 </a></p>
 <p id="fallback" style="display:none;margin-top:24px;color:#666">
-  App didn't open? Make sure Bromo is installed, then tap the button above.
+  App didn't open? Make sure Cal is installed, then tap the button above.
 </p>
 <script>
   window.location.href = "${deepLink}";
@@ -1342,7 +1343,7 @@ function dedupeDetectedMemories(memories) {
 // -----------------------------------
 app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
   try {
-    const { messages = [], mode = "SFW", threadSummary = null, recentMessages = [], memories = [] } =
+    const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [] } =
       req.body;
     const pace = paceFromReq(req.body);
 
@@ -1351,7 +1352,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 
     const userText = extractLastUserText(messages);
 
-    // Never call OpenAI without a real user message.
+    // Never call the API without a real user message.
     if (!userText.trim()) {
       if (DEBUG_CHAT) {
         console.log("[CHAT DEBUG] blocked: no_user_text", {
@@ -1380,18 +1381,18 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     }
 
     // -----------------------------------
-    // NSFW Adult Verification Gate
+    // After Dark Adult Verification Gate
     // -----------------------------------
-    if (mode === "NSFW" && !isAdultVerifiedToken(req)) {
+    if (mode === "after_dark" && !isAdultVerifiedToken(req)) {
       if (DEBUG_CHAT) {
-        console.log("[CHAT DEBUG] blocked: nsfw_not_verified", {
+        console.log("[CHAT DEBUG] blocked: after_dark_not_verified", {
           hasToken: !!req.headers?.authorization,
           code: extractTokenCode(req),
         });
       }
       return res.json({
         ok: true,
-        reply: "NSFW mode isn't available on your account. You can switch to SFW in Settings.",
+        reply: "After Dark mode isn't available on your account. You can switch to SFW in Settings.",
         blocked: true,
         reason: "adult_verification_required",
       });
@@ -1438,7 +1439,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     }
 
     const temperature =
-      mode === "NSFW"
+      mode === "after_dark"
         ? pace === "AFTER_DARK"
           ? 0.95
           : pace === "TURN_IT_UP"
@@ -1446,7 +1447,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
           : 0.85
         : 0.7;
 
-    const model = "gpt-4.1";
+    const model = "claude-sonnet-4-20250514";
 
     if (DEBUG_CHAT) {
       console.log("[CHAT DEBUG] request", {
@@ -1466,16 +1467,17 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       });
     }
 
-    // Build context with thread summary if available
-    let contextMessages = [];
-
+    // Append thread summary to system prompt if available
+    let fullSystemPrompt = systemPrompt;
     if (threadSummary) {
-      const recentCount = recentMessages.length;
-      const olderMessages = recentCount > 0 ? messages.slice(0, -recentCount) : messages;
+      fullSystemPrompt += `\n\nThread context: ${threadSummary}`;
+    }
 
-      contextMessages = [
-        { role: "system", content: systemPrompt },
-        { role: "system", content: `Thread context: ${threadSummary}` },
+    // Build conversation history from messages
+    let chatMessages = [];
+    if (threadSummary && recentMessages.length > 0) {
+      const olderMessages = messages.slice(0, -recentMessages.length);
+      chatMessages = [
         ...olderMessages,
         ...recentMessages.map((m) => ({
           role: String(m.role || "").toLowerCase() === "assistant" ? "assistant" : "user",
@@ -1483,34 +1485,33 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
         })),
       ];
     } else {
-      contextMessages = [{ role: "system", content: systemPrompt }, ...messages];
+      chatMessages = [...messages];
     }
 
-    const normalizedMessages = contextMessages.map((m) => {
-      const role = String(m.role || "").toLowerCase();
-
-      if (role === "user" || role === "assistant" || role === "system") {
-        return { role, content: m.content };
-      }
-
-      return { role: "user", content: m.content };
-    });
+    // Normalize to user/assistant only (system prompt passed separately to Anthropic)
+    const conversationHistory = chatMessages
+      .map((m) => {
+        const role = String(m.role || "").toLowerCase();
+        if (role === "system") return null;
+        if (role === "user" || role === "assistant") return { role, content: m.content };
+        return { role: "user", content: m.content };
+      })
+      .filter(Boolean);
 
     if (DEBUG_CHAT) {
       console.log(
-        "[CHAT DEBUG] normalized roles",
-        normalizedMessages.map((m, i) => `${i}:${m.role}`)
+        "[CHAT DEBUG] conversation roles",
+        conversationHistory.map((m, i) => `${i}:${m.role}`)
       );
     }
 
-    const completion = await openai.chat.completions.create({
-      model,
-      messages: normalizedMessages,
-      temperature,
-      frequency_penalty: 0.6,
+    const calResponse = await sendMessageToCal({
+      mode,
+      systemPrompt: fullSystemPrompt,
+      conversationHistory,
     });
 
-    const rawReply = completion?.choices?.[0]?.message?.content ?? "(no reply)";
+    const rawReply = calResponse.reply ?? "(no reply)";
     const reply = softenEarlySnap(rawReply, messages);
 
     if (DEBUG_CHAT) {
@@ -1598,9 +1599,9 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 // -----------------------------------
 app.post("/summarize", chatLimiter, requireAuth, async (req, res) => {
   try {
-    const { messages = [], mode = "SFW" } = req.body;
+    const { messages = [], mode = "sfw" } = req.body;
 
-    if (mode === "NSFW" && !isAdultVerifiedToken(req)) {
+    if (mode === "after_dark" && !isAdultVerifiedToken(req)) {
       return res.json({
         ok: true,
         blocked: true,
@@ -1624,17 +1625,17 @@ app.post("/summarize", chatLimiter, requireAuth, async (req, res) => {
 
     const conversationText = messages
       .map((m) => {
-        const speaker = m.role === "user" ? "User" : "Bromo";
+        const speaker = m.role === "user" ? "User" : "Cal";
         return `${speaker}: ${m.content}`;
       })
       .join("\n\n");
 
     const modeNote =
-      mode === "NSFW"
-        ? "This is an NSFW conversation. Summarize content accurately including mature themes."
+      mode === "after_dark"
+        ? "This is an After Dark conversation. Summarize content accurately including mature themes."
         : "This is an SFW conversation. Keep the summary appropriate and non-explicit.";
 
-    const systemPrompt = `You are summarizing a conversation between the user and Bromo (an AI companion).
+    const systemPrompt = `You are summarizing a conversation between the user and Cal (an AI companion).
 
 Create a concise 2-3 sentence summary that captures:
 - Main topics discussed
@@ -1678,11 +1679,11 @@ Keep it brief and factual. This will be used as context for future messages. ${m
 // POST /session-summary — generate and store a session continuity summary
 app.post("/session-summary", requireAuth, async (req, res) => {
   try {
-    const { messages = [], mode = "SFW", device_id } = req.body;
+    const { messages = [], mode = "sfw", device_id } = req.body;
     const userId = req.userId || null;
     const deviceId = device_id || null;
 
-    if (mode === "NSFW" && !isAdultVerifiedToken(req)) {
+    if (mode === "after_dark" && !isAdultVerifiedToken(req)) {
       return res.json({
         ok: true,
         blocked: true,
@@ -1700,7 +1701,7 @@ app.post("/session-summary", requireAuth, async (req, res) => {
 
     const conversationText = messages
       .map((m) => {
-        const speaker = m.role === "user" ? "User" : "Bromo";
+        const speaker = m.role === "user" ? "User" : "Cal";
         return `${speaker}: ${m.content}`;
       })
       .join("\n\n");
@@ -2071,9 +2072,9 @@ function shouldTriggerDetection(messages) {
     return false;
   }
 
-  // Skip during high escalation NSFW sequences
+  // Skip during high escalation After Dark sequences
   const lastMessage = recentUserMessages[recentUserMessages.length - 1].toLowerCase();
-  const nsfwEscalationKeywords = [
+  const escalationKeywords = [
     "fuck",
     "cum",
     "dick",
@@ -2087,12 +2088,12 @@ function shouldTriggerDetection(messages) {
     "deeper",
   ];
 
-  const hasMultipleNsfwKeywords =
-    nsfwEscalationKeywords.filter((kw) => lastMessage.includes(kw)).length >= 2;
+  const hasMultipleEscalationKeywords =
+    escalationKeywords.filter((kw) => lastMessage.includes(kw)).length >= 2;
 
-  if (hasMultipleNsfwKeywords) {
+  if (hasMultipleEscalationKeywords) {
     if (DEBUG_CHAT) {
-      console.log("[DETECT] Skipping: High NSFW escalation detected");
+      console.log("[DETECT] Skipping: High escalation detected");
     }
     return false;
   }
@@ -2107,7 +2108,7 @@ function shouldTriggerDetection(messages) {
 // POST /detect-memory - Analyze recent messages for memorable facts
 app.post("/detect-memory", requireAuth, async (req, res) => {
   try {
-    const { messages = [], mode = "SFW" } = req.body;
+    const { messages = [], mode = "sfw" } = req.body;
 
     if (!Array.isArray(messages) || messages.length === 0) {
       return res.status(400).json({
@@ -2246,11 +2247,11 @@ async function generateReEngagement(deviceId, userId, mode) {
   // 5. Tone-varying instruction based on unanswered count
   let reEngageInstruction;
   if (unansweredCount === 0) {
-    reEngageInstruction = `Generate a single short message from Bromo reaching out to the user unprompted. It should feel natural, not like a notification. It can reference something from memory or the last conversation if relevant. Keep it to 1-2 sentences maximum. Do not start with the user's name. Do not announce that time has passed.`;
+    reEngageInstruction = `Generate a single short message from Cal reaching out to the user unprompted. It should feel natural, not like a notification. It can reference something from memory or the last conversation if relevant. Keep it to 1-2 sentences maximum. Do not start with the user's name. Do not announce that time has passed.`;
   } else if (unansweredCount === 1) {
-    reEngageInstruction = `Generate a single short message from Bromo reaching out again. Keep it even lighter — a single sentence, maybe a casual observation or a dry joke. No pressure. Don't reference any previous unanswered message. Do not start with the user's name.`;
+    reEngageInstruction = `Generate a single short message from Cal reaching out again. Keep it even lighter — a single sentence, maybe a casual observation or a dry joke. No pressure. Don't reference any previous unanswered message. Do not start with the user's name.`;
   } else {
-    reEngageInstruction = `Generate a very brief one-sentence message from Bromo. Something offhand and low-pressure. This is a gentle last check-in. Do not start with the user's name. Do not be heavy or guilt-trippy.`;
+    reEngageInstruction = `Generate a very brief one-sentence message from Cal. Something offhand and low-pressure. This is a gentle last check-in. Do not start with the user's name. Do not be heavy or guilt-trippy.`;
   }
 
   const systemPrompt = baseSystemPrompt + `\n\n[INTERNAL — RE-ENGAGEMENT]\n${reEngageInstruction}`;
@@ -2325,7 +2326,7 @@ if (db) {
 app.get("/reengagement", requireAuth, async (req, res) => {
   try {
     const deviceId = req.query.device_id || null;
-    const mode = req.query.mode || "SFW";
+    const mode = req.query.mode || "sfw";
     const userId = req.userId || null;
 
     if (!deviceId && !userId) {
@@ -2390,7 +2391,7 @@ const resolvedPort = Number(process.env.PORT);
 const PORT = Number.isFinite(resolvedPort) ? resolvedPort : 8080;
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🔥 Bromo server listening on 0.0.0.0:${PORT}`);
+  console.log(`🔥 Cal server listening on 0.0.0.0:${PORT}`);
 });
 
 // Keepalive log (helps confirm it isn't being killed)
