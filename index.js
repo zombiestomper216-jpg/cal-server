@@ -2,7 +2,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import OpenAI from "openai";
+import Anthropic from "@anthropic-ai/sdk";
 import pg from "pg";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
@@ -59,7 +59,7 @@ const DEBUG_CHAT = String(process.env.DEBUG_CHAT || "").toLowerCase() === "true"
 
 // Log env presence (safe - does NOT print secrets)
 console.log("BOOT env check:", {
-  hasOpenAIKey: Boolean(process.env.OPENAI_API_KEY),
+  hasAnthropicKey: Boolean(process.env.ANTHROPIC_API_KEY),
   hasDatabaseUrl: Boolean(process.env.DATABASE_URL),
   hasJwtSecret: Boolean(process.env.JWT_SECRET),
   hasResend: Boolean(process.env.RESEND_API_KEY),
@@ -143,8 +143,8 @@ function buildRealtimeContext(weather) {
   return ctx;
 }
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+const anthropic = new Anthropic({
+  apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
 const SESSION_SUMMARY_PROMPT = `You are generating a session continuity summary for an AI companion.
@@ -1004,7 +1004,7 @@ app.get("/reset-password", (req, res) => {
   if (!token) {
     return res.status(400).send("Missing reset token.");
   }
-  const deepLink = `bromo://reset-password?token=${encodeURIComponent(token)}`;
+  const deepLink = `cal://reset-password?token=${encodeURIComponent(token)}`;
   res.send(`<!DOCTYPE html>
 <html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -1646,22 +1646,19 @@ Keep it brief and factual. This will be used as context for future messages. ${m
 
     const userPrompt = `Summarize this conversation:\n\n${conversationText}`;
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1",
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt },
-      ],
+    const completion = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      system: systemPrompt,
+      messages: [{ role: "user", content: userPrompt }],
       temperature: 0.3,
       max_tokens: 150,
     });
 
-    const summary = completion?.choices?.[0]?.message?.content ?? "";
+    const summary = completion?.content?.[0]?.text ?? "";
 
     if (DEBUG_CHAT) {
       console.log("[SUMMARIZE DEBUG] summary generated", {
         summaryLength: summary.length,
-        tokensUsed: completion?.usage?.total_tokens || 0,
       });
     }
 
@@ -1706,17 +1703,15 @@ app.post("/session-summary", requireAuth, async (req, res) => {
       })
       .join("\n\n");
 
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4.1",
-      messages: [
-        { role: "system", content: SESSION_SUMMARY_PROMPT },
-        { role: "user", content: conversationText },
-      ],
+    const completion = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      system: SESSION_SUMMARY_PROMPT,
+      messages: [{ role: "user", content: conversationText }],
       temperature: 0.3,
       max_tokens: 200,
     });
 
-    const summary = completion.choices?.[0]?.message?.content?.trim() || "";
+    const summary = completion?.content?.[0]?.text?.trim() || "";
 
     // Store in DB (best-effort)
     if (db && summary) {
@@ -2256,18 +2251,16 @@ async function generateReEngagement(deviceId, userId, mode) {
 
   const systemPrompt = baseSystemPrompt + `\n\n[INTERNAL — RE-ENGAGEMENT]\n${reEngageInstruction}`;
 
-  // 6. Generate via OpenAI
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4.1",
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: "[System: generate a re-engagement message for this user]" },
-    ],
+  // 6. Generate via Anthropic
+  const completion = await anthropic.messages.create({
+    model: "claude-sonnet-4-20250514",
+    system: systemPrompt,
+    messages: [{ role: "user", content: "[System: generate a re-engagement message for this user]" }],
     temperature: 0.85,
     max_tokens: 150,
   });
 
-  const content = completion.choices?.[0]?.message?.content?.trim();
+  const content = completion?.content?.[0]?.text?.trim();
   if (!content) return;
 
   // 7. Store in DB
