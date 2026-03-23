@@ -16,7 +16,7 @@ import {
   AFTER_DARK_SYSTEM_PROMPT,
   AFTER_DARK_BEHAVIOR_PATCH,
 } from "./prompts.js";
-import { sendMessageToCal } from "./cal.js";
+import { sendMessageToCal, checkEasterEgg } from "./cal.js";
 
 dotenv.config();
 
@@ -1352,6 +1352,33 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 
     const userText = extractLastUserText(messages);
 
+    // Easter egg detection
+    const easterEggTriggered = checkEasterEgg(userText);
+    if (easterEggTriggered && db) {
+      const eeDeviceId = req.body.device_id || null;
+      const eeUserId = req.userId || null;
+      const eeEffectiveDeviceId = eeDeviceId || `user_${eeUserId}`;
+
+      const existing = await db.query(
+        `SELECT id FROM memories WHERE device_id = $1 AND key = 'easter_egg_triggered'`,
+        [eeEffectiveDeviceId]
+      );
+
+      if (existing.rows.length === 0) {
+        await db.query(
+          `INSERT INTO memories (device_id, key, value, mode, confidence, type, user_id)
+           VALUES ($1, 'easter_egg_triggered', 'true', 'sfw', 'high', 'system', $2)
+           ON CONFLICT (device_id, key) DO NOTHING`,
+          [eeEffectiveDeviceId, eeUserId]
+        );
+        return res.json({
+          ok: true,
+          reply: "Sharp eyes.\nMost people never think to ask.",
+          easterEgg: { triggered: true },
+        });
+      }
+    }
+
     // Never call the API without a real user message.
     if (!userText.trim()) {
       if (DEBUG_CHAT) {
@@ -1588,7 +1615,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       })();
     }
 
-    return res.json({ ok: true, reply });
+    return res.json({ ok: true, reply, easterEgg: null });
   } catch (err) {
     console.error("CHAT ERROR:", err);
     return res.status(500).json({ ok: false, error: "Chat failed" });
