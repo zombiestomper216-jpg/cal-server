@@ -64,6 +64,7 @@ console.log("BOOT env check:", {
   hasJwtSecret: Boolean(process.env.JWT_SECRET),
   hasResend: Boolean(process.env.RESEND_API_KEY),
   hasWeatherKey: Boolean(process.env.OPENWEATHER_API_KEY),
+  hasAdminSecret: Boolean(process.env.ADMIN_SECRET),
 });
 
 // -----------------------------------
@@ -216,6 +217,19 @@ async function runMigrations() {
       response_received BOOLEAN NOT NULL DEFAULT FALSE
     )`,
     `CREATE INDEX IF NOT EXISTS idx_re_engagement_pending ON re_engagement_messages (device_id, user_id, delivered, generated_at DESC)`,
+    // Invite code system
+    `CREATE TABLE IF NOT EXISTS invite_codes (
+      id              SERIAL PRIMARY KEY,
+      code            VARCHAR(8) UNIQUE NOT NULL,
+      tier            VARCHAR NOT NULL,
+      used            BOOLEAN NOT NULL DEFAULT FALSE,
+      used_by_device_id VARCHAR,
+      founder         BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at      TIMESTAMP DEFAULT NOW(),
+      redeemed_at     TIMESTAMP
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes (code)`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS founder BOOLEAN DEFAULT FALSE`,
   ];
   for (const sql of migrations) {
     try {
@@ -622,6 +636,25 @@ function verifyJwt(token) {
 }
 
 // -----------------------------------
+// Admin Auth Middleware
+// -----------------------------------
+function requireAdmin(req, res, next) {
+  const secret = process.env.ADMIN_SECRET;
+  if (!secret) {
+    return res.status(503).json({ ok: false, error: "Admin not configured." });
+  }
+  const authHeader = String(req.headers?.authorization || "").trim();
+  if (!authHeader.toLowerCase().startsWith("bearer ")) {
+    return res.status(401).json({ ok: false, error: "Unauthorized." });
+  }
+  const token = authHeader.slice(7).trim();
+  if (token !== secret) {
+    return res.status(401).json({ ok: false, error: "Unauthorized." });
+  }
+  next();
+}
+
+// -----------------------------------
 // Token Verification Helpers
 // -----------------------------------
 
@@ -764,7 +797,7 @@ app.post("/auth", authLimiter, async (req, res) => {
   try {
     const loginId = String(username).toLowerCase();
     const result = await db.query(
-      "SELECT id, username, email, password_hash, adult_verified FROM users WHERE username = $1 OR email = $1",
+      "SELECT id, username, email, password_hash, adult_verified, founder FROM users WHERE username = $1 OR email = $1",
       [loginId]
     );
 
@@ -787,6 +820,22 @@ app.post("/auth", authLimiter, async (req, res) => {
 
     if (!valid) {
       return res.status(401).json({ ok: false, error: "Invalid username or password." });
+    }
+
+    // Lazy founder application: check if device redeemed an after_dark code with founder=true
+    if (device_id && !user.founder) {
+      try {
+        const founderCheck = await db.query(
+          "SELECT id FROM invite_codes WHERE used_by_device_id = $1 AND founder = true LIMIT 1",
+          [device_id]
+        );
+        if (founderCheck.rows.length > 0) {
+          await db.query("UPDATE users SET founder = true WHERE id = $1", [user.id]);
+          user.founder = true;
+        }
+      } catch (e) {
+        console.warn("[AUTH] Founder check failed:", e?.message);
+      }
     }
 
     let hasOrphanedMemories = false;
@@ -812,7 +861,7 @@ app.post("/auth", authLimiter, async (req, res) => {
     return res.json({
       ok: true,
       token,
-      user: { id: user.id, username: user.username, email: user.email, adultVerified: user.adult_verified },
+      user: { id: user.id, username: user.username, email: user.email, adultVerified: user.adult_verified, founder: user.founder || false },
       hasOrphanedMemories,
       hasOtherDeviceMemories,
       otherDeviceIds,
@@ -829,7 +878,7 @@ app.post("/auth", authLimiter, async (req, res) => {
 
 app.post("/signup", authLimiter, async (req, res) => {
   try {
-    const { username, email, password } = req.body || {};
+    const { username, email, password, device_id } = req.body || {};
 
     if (!username || !email || !password) {
       return res.status(400).json({ ok: false, error: "username, email, and password required." });
@@ -858,17 +907,34 @@ app.post("/signup", authLimiter, async (req, res) => {
     const result = await db.query(
       `INSERT INTO users (username, email, password_hash)
        VALUES ($1, $2, $3)
-       RETURNING id, username, email, adult_verified, created_at`,
+       RETURNING id, username, email, adult_verified, founder, created_at`,
       [username.toLowerCase(), email.toLowerCase(), passwordHash]
     );
 
     const user = result.rows[0];
+
+    // Lazy founder application: check if device redeemed an after_dark code with founder=true
+    if (device_id && !user.founder) {
+      try {
+        const founderCheck = await db.query(
+          "SELECT id FROM invite_codes WHERE used_by_device_id = $1 AND founder = true LIMIT 1",
+          [device_id]
+        );
+        if (founderCheck.rows.length > 0) {
+          await db.query("UPDATE users SET founder = true WHERE id = $1", [user.id]);
+          user.founder = true;
+        }
+      } catch (e) {
+        console.warn("[SIGNUP] Founder check failed:", e?.message);
+      }
+    }
+
     const token = signJwt(user.id, user.adult_verified);
 
     return res.json({
       ok: true,
       token,
-      user: { id: user.id, username: user.username, email: user.email, adultVerified: user.adult_verified },
+      user: { id: user.id, username: user.username, email: user.email, adultVerified: user.adult_verified, founder: user.founder || false },
     });
   } catch (err) {
     if (err.code === "23505") {
@@ -899,7 +965,7 @@ app.post("/login", authLimiter, async (req, res) => {
 
     const loginId = String(username).toLowerCase();
     const result = await db.query(
-      "SELECT id, username, email, password_hash, adult_verified FROM users WHERE username = $1 OR email = $1",
+      "SELECT id, username, email, password_hash, adult_verified, founder FROM users WHERE username = $1 OR email = $1",
       [loginId]
     );
 
@@ -920,6 +986,22 @@ app.post("/login", authLimiter, async (req, res) => {
     console.log("AUTH: bcrypt.compare result", { user_id: user.id, valid });
     if (!valid) {
       return res.status(401).json({ ok: false, error: "Invalid username or password." });
+    }
+
+    // Lazy founder application: check if device redeemed an after_dark code with founder=true
+    if (device_id && !user.founder) {
+      try {
+        const founderCheck = await db.query(
+          "SELECT id FROM invite_codes WHERE used_by_device_id = $1 AND founder = true LIMIT 1",
+          [device_id]
+        );
+        if (founderCheck.rows.length > 0) {
+          await db.query("UPDATE users SET founder = true WHERE id = $1", [user.id]);
+          user.founder = true;
+        }
+      } catch (e) {
+        console.warn("[LOGIN] Founder check failed:", e?.message);
+      }
     }
 
     let hasOrphanedMemories = false;
@@ -945,7 +1027,7 @@ app.post("/login", authLimiter, async (req, res) => {
     return res.json({
       ok: true,
       token,
-      user: { id: user.id, username: user.username, email: user.email, adultVerified: user.adult_verified },
+      user: { id: user.id, username: user.username, email: user.email, adultVerified: user.adult_verified, founder: user.founder || false },
       hasOrphanedMemories,
       hasOtherDeviceMemories,
       otherDeviceIds,
@@ -953,6 +1035,128 @@ app.post("/login", authLimiter, async (req, res) => {
   } catch (err) {
     console.error("LOGIN ERROR:", err);
     return res.status(500).json({ ok: false, error: "Login failed." });
+  }
+});
+
+// -----------------------------------
+// Admin: Invite Code Generation
+// -----------------------------------
+app.post("/admin/generate-code", requireAdmin, async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Database not available." });
+    }
+
+    const { tier } = req.body || {};
+    const validTiers = ["just_right", "turn_it_up", "after_dark"];
+    if (!tier || !validTiers.includes(tier)) {
+      return res.status(400).json({
+        ok: false,
+        error: `Invalid tier. Must be one of: ${validTiers.join(", ")}`,
+      });
+    }
+
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const bytes = crypto.randomBytes(8);
+    const code = Array.from(bytes).map((b) => chars[b % chars.length]).join("");
+
+    await db.query(
+      "INSERT INTO invite_codes (code, tier) VALUES ($1, $2)",
+      [code, tier]
+    );
+
+    return res.json({ ok: true, code, tier });
+  } catch (err) {
+    if (err.code === "23505") {
+      // Unique constraint collision — retry once
+      try {
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        const bytes = crypto.randomBytes(8);
+        const code = Array.from(bytes).map((b) => chars[b % chars.length]).join("");
+        const { tier } = req.body || {};
+        await db.query("INSERT INTO invite_codes (code, tier) VALUES ($1, $2)", [code, tier]);
+        return res.json({ ok: true, code, tier });
+      } catch (retryErr) {
+        console.error("GENERATE-CODE RETRY ERROR:", retryErr);
+        return res.status(500).json({ ok: false, error: "Code generation failed." });
+      }
+    }
+    console.error("GENERATE-CODE ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Code generation failed." });
+  }
+});
+
+// -----------------------------------
+// Redeem Invite Code (no auth required)
+// -----------------------------------
+app.post("/redeem-code", authLimiter, async (req, res) => {
+  try {
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Database not available." });
+    }
+
+    const { code, device_id } = req.body || {};
+    if (!code || !device_id) {
+      return res.status(400).json({ ok: false, error: "code and device_id required." });
+    }
+
+    const normalized = String(code).trim().toUpperCase();
+
+    // Look up the code
+    const result = await db.query(
+      "SELECT id, tier, used FROM invite_codes WHERE code = $1",
+      [normalized]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Invalid invite code." });
+    }
+
+    const invite = result.rows[0];
+    if (invite.used) {
+      return res.status(409).json({ ok: false, error: "This code has already been used." });
+    }
+
+    // Determine founder eligibility
+    let founder = false;
+    if (invite.tier === "after_dark") {
+      const countResult = await db.query(
+        "SELECT COUNT(*) AS cnt FROM users WHERE founder = true"
+      );
+      const founderCount = parseInt(countResult.rows[0].cnt, 10);
+      founder = founderCount < 20;
+    }
+
+    // Mark code as used
+    await db.query(
+      `UPDATE invite_codes
+       SET used = true, used_by_device_id = $1, redeemed_at = NOW(), founder = $2
+       WHERE id = $3`,
+      [device_id, founder, invite.id]
+    );
+
+    // Best-effort: try to find a user associated with this device_id and set founder
+    if (founder) {
+      try {
+        const userLookup = await db.query(
+          "SELECT DISTINCT user_id FROM user_activity WHERE device_id = $1 AND user_id IS NOT NULL LIMIT 1",
+          [device_id]
+        );
+        if (userLookup.rows.length > 0) {
+          await db.query(
+            "UPDATE users SET founder = true WHERE id = $1",
+            [userLookup.rows[0].user_id]
+          );
+        }
+      } catch (e) {
+        console.warn("[REDEEM] Best-effort founder user update failed:", e?.message);
+      }
+    }
+
+    return res.json({ ok: true, tier: invite.tier, founder });
+  } catch (err) {
+    console.error("REDEEM-CODE ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Redemption failed." });
   }
 });
 
