@@ -1769,7 +1769,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     });
 
     const rawReply = calResponse.reply ?? "(no reply)";
-    const reply = softenEarlySnap(rawReply, messages);
+    const reply = softenEarlySnap(rawReply, messages).replace(/—/g, ",");
 
     if (DEBUG_CHAT) {
       console.log("[CHAT DEBUG] reply", {
