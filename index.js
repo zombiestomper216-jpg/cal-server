@@ -230,6 +230,7 @@ async function runMigrations() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes (code)`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS founder BOOLEAN DEFAULT FALSE`,
+    `ALTER TABLE users ADD COLUMN IF NOT EXISTS device_id VARCHAR`,
   ];
   for (const sql of migrations) {
     try {
@@ -838,6 +839,14 @@ app.post("/auth", authLimiter, async (req, res) => {
       }
     }
 
+    if (device_id) {
+      try {
+        await db.query("UPDATE users SET device_id = $1 WHERE id = $2", [device_id, user.id]);
+      } catch (e) {
+        console.warn("[AUTH] device_id update failed:", e?.message);
+      }
+    }
+
     let hasOrphanedMemories = false;
     let hasOtherDeviceMemories = false;
     let otherDeviceIds = [];
@@ -929,6 +938,14 @@ app.post("/signup", authLimiter, async (req, res) => {
       }
     }
 
+    if (device_id) {
+      try {
+        await db.query("UPDATE users SET device_id = $1 WHERE id = $2", [device_id, user.id]);
+      } catch (e) {
+        console.warn("[SIGNUP] device_id update failed:", e?.message);
+      }
+    }
+
     const token = signJwt(user.id, user.adult_verified);
 
     return res.json({
@@ -1001,6 +1018,14 @@ app.post("/login", authLimiter, async (req, res) => {
         }
       } catch (e) {
         console.warn("[LOGIN] Founder check failed:", e?.message);
+      }
+    }
+
+    if (device_id) {
+      try {
+        await db.query("UPDATE users SET device_id = $1 WHERE id = $2", [device_id, user.id]);
+      } catch (e) {
+        console.warn("[LOGIN] device_id update failed:", e?.message);
       }
     }
 
