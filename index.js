@@ -1664,7 +1664,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
         if (deviceId || userId) {
           const ssResult = await db.query(
             `SELECT summary FROM session_summaries
-             WHERE (device_id = $1 OR user_id = $2) AND mode = $3
+             WHERE (user_id = $2 OR (user_id IS NULL AND device_id = $1)) AND mode = $3
              ORDER BY created_at DESC LIMIT 1`,
             [deviceId, userId, mode]
           );
@@ -1809,7 +1809,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
         `UPDATE re_engagement_messages SET response_received = TRUE
          WHERE id = (
            SELECT id FROM re_engagement_messages
-           WHERE (device_id = $1 OR user_id = $2)
+           WHERE (user_id = $2 OR (user_id IS NULL AND device_id = $1))
              AND delivered = TRUE AND response_received = FALSE
            ORDER BY generated_at DESC LIMIT 1
          )`,
@@ -2048,8 +2048,8 @@ app.get("/memories", requireAuth, async (req, res) => {
     let whereClause;
 
     if (req.userId && device_id) {
-      // JWT auth with device_id: get both transferred and untransferred memories
-      whereClause = "(device_id = $1 OR user_id = $2)";
+      // JWT auth with device_id: get user's memories + unclaimed orphans on this device
+      whereClause = "(user_id = $2 OR (user_id IS NULL AND device_id = $1))";
       params.push(device_id, req.userId);
     } else if (req.userId) {
       whereClause = "user_id = $1";
@@ -2445,7 +2445,7 @@ async function generateReEngagement(deviceId, userId, mode) {
   try {
     const memResult = await db.query(
       `SELECT * FROM memories
-       WHERE (device_id = $1 OR user_id = $2)
+       WHERE (user_id = $2 OR (user_id IS NULL AND device_id = $1))
          AND confidence = 'high'
        ORDER BY updated_at DESC`,
       [deviceId, userId]
@@ -2460,7 +2460,7 @@ async function generateReEngagement(deviceId, userId, mode) {
   try {
     const ssResult = await db.query(
       `SELECT summary FROM session_summaries
-       WHERE (device_id = $1 OR user_id = $2) AND mode = $3
+       WHERE (user_id = $2 OR (user_id IS NULL AND device_id = $1)) AND mode = $3
        ORDER BY created_at DESC LIMIT 1`,
       [deviceId, userId, mode]
     );
@@ -2474,7 +2474,7 @@ async function generateReEngagement(deviceId, userId, mode) {
   try {
     const prevResult = await db.query(
       `SELECT COUNT(*) as cnt FROM re_engagement_messages
-       WHERE (device_id = $1 OR user_id = $2)
+       WHERE (user_id = $2 OR (user_id IS NULL AND device_id = $1))
          AND response_received = FALSE`,
       [deviceId, userId]
     );
