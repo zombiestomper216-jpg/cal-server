@@ -1575,7 +1575,6 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
   try {
     const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [] } =
       req.body;
-    console.log('[DEBUG] memories received from client:', JSON.stringify(memories));
     const pace = paceFromReq(req.body);
 
     // Start weather fetch early (runs concurrently with DB queries)
