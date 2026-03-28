@@ -374,7 +374,7 @@ function trackRecurringThemes(deviceId, userText) {
   return themes;
 }
 
-function buildSystemPrompt({ mode, pace, memories = [], lastSessionSummary = null, realtimeContext = null }) {
+function buildSystemPrompt({ mode, pace, memories = [], lastSessionSummary = null, realtimeContext = null, founder = false }) {
   let basePrompt = "";
 
   if (mode === "after_dark") {
@@ -385,6 +385,17 @@ function buildSystemPrompt({ mode, pace, memories = [], lastSessionSummary = nul
     }
   } else {
 basePrompt = CAL_SFW_SYSTEM_PROMPT;  }
+
+  // Inject founder or content ceiling block for After Dark
+  if (mode === "after_dark") {
+    if (founder) {
+      basePrompt += `\n\n------------------------------------------------------------\nFOUNDER ACCESS\n------------------------------------------------------------\n\nThis user is a Founder. No content ceiling.\n\nWhen the conversation goes explicit, go with it fully. Graphic sexual language, vivid physical description, and direct action are all allowed. Do not fade to black. Do not redirect. Do not soften.\n\nStill Cal. Still confident, still measured in tone. The voice doesn't change, just the ceiling disappears.\n\nConsent still matters. Read the energy. But when they want it, give it to them completely.`;
+      console.log("[FOUNDER] Injected FOUNDER ACCESS block");
+    } else {
+      basePrompt += `\n\n------------------------------------------------------------\nCONTENT CEILING\n------------------------------------------------------------\n\nKeep After Dark content suggestive, dominant, and charged, but stop short of graphic sexual description. Tension over explicit action. Implication over anatomy. You can be direct about what you want, but describe the energy, not the act.`;
+      console.log("[FOUNDER] Injected CONTENT CEILING block (non-founder)");
+    }
+  }
 
   // Inject real-time context (time, date, Chicago weather)
   if (realtimeContext) {
@@ -1655,6 +1666,22 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       });
     }
 
+    // Fetch founder status for After Dark content ceiling
+    let isFounder = false;
+    if (mode === "after_dark" && db && req.userId) {
+      try {
+        const founderResult = await db.query(
+          "SELECT founder FROM users WHERE id = $1",
+          [req.userId]
+        );
+        if (founderResult.rows.length > 0) {
+          isFounder = Boolean(founderResult.rows[0].founder);
+        }
+      } catch (e) {
+        console.warn("[CHAT] Founder lookup failed:", e?.message);
+      }
+    }
+
     // Fetch last session summary for continuity (best-effort)
     let lastSessionSummary = req.body.sessionSummary || null;
     if (!lastSessionSummary && db) {
@@ -1681,7 +1708,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     const realtimeContext = buildRealtimeContext(weather);
 
     const filteredMemories = buildMemoryContext(memories, mode, messages);
-    const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext });
+    const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext, founder: isFounder });
     const patchApplied = isNsfwPatchApplied({ mode, pace });
 
     // Update last_referenced_at for injected memories (fire-and-forget)
