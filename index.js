@@ -2212,7 +2212,7 @@ app.put("/memories/:id", requireAuth, async (req, res) => {
   try {
     console.log('[MEMORY UPDATE DEBUG]', JSON.stringify(req.body, null, 2));
     const { id } = req.params;
-    const { value, mode } = req.body;
+    const { value, mode, type } = req.body;
 
     if (!value) {
       return res.status(400).json({
@@ -2227,10 +2227,10 @@ app.put("/memories/:id", requireAuth, async (req, res) => {
 
     const result = await db.query(
       `UPDATE memories
-       SET value = $1, mode = $2, updated_at = NOW()
-       WHERE id = $3
+       SET value = $1, mode = $2, type = $3, updated_at = NOW()
+       WHERE id = $4
        RETURNING *`,
-      [value, mode || null, id]
+      [value, mode || null, type || null, id]
     );
 
     if (result.rows.length === 0) {
