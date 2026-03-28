@@ -2210,7 +2210,6 @@ app.post("/memories/transfer", requireAuth, async (req, res) => {
 // PUT /memories/:id - Update a memory
 app.put("/memories/:id", requireAuth, async (req, res) => {
   try {
-    console.log('[MEMORY UPDATE DEBUG]', JSON.stringify(req.body, null, 2));
     const { id } = req.params;
     const { value, mode, type } = req.body;
 
