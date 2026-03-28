@@ -366,7 +366,7 @@ function trackRecurringThemes(deviceId, userText) {
         category: "recurring_theme",
         type: "recurring_theme",
         key: `recurring_theme_${word}`,
-        value: `He keeps bringing up "${word}" — it seems important to him`,
+        value: `User frequently brings up the topic of "${word}"`,
         confidence: "high",
       });
     }
@@ -1515,17 +1515,17 @@ if (
 function formatMemoryValue(category, rawValue) {
   switch (category) {
     case "preferences":
-      return `He's into ${rawValue}`;
+      return `User likes ${rawValue}`;
     case "dislikes":
-      return `He can't stand ${rawValue}`;
+      return `User dislikes ${rawValue}`;
     case "identity":
-      return `He's ${rawValue}`;
+      return `User is ${rawValue}`;
     case "activities":
-      return `He's ${rawValue}`;
+      return `User is ${rawValue}`;
     case "boundaries":
-      return `Don't ${rawValue}`;
+      return `User has a boundary: do not ${rawValue}`;
     case "emotional_moment":
-      return `He shared that he's been ${rawValue}`;
+      return `User has been ${rawValue}`;
     default:
       return rawValue;
   }
