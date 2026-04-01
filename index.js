@@ -470,7 +470,7 @@ function buildMemoryContext(allMemories, mode, messages = []) {
   if (!allMemories || allMemories.length === 0) return [];
 
   // Strict mode scoping: only matching mode or 'all'
-  const filtered = allMemories.filter((m) => m.mode === mode || m.mode === "all");
+  const filtered = allMemories.filter((m) => !m.mode || m.mode === mode || m.mode === "all");
 
   // Extract keywords from last 3 user messages for broader context
   const recentUserTexts = (Array.isArray(messages) ? messages : [])
