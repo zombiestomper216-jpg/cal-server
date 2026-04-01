@@ -2131,7 +2131,7 @@ app.post("/memories", requireAuth, async (req, res) => {
        DO UPDATE SET value = $3, mode = $4, type = COALESCE($5, memories.type),
                     user_id = COALESCE($6, memories.user_id), updated_at = NOW()
        RETURNING *`,
-      [device_id, key, value, mode, type, userId]
+      [device_id, key, value, normalizeMemoryMode(req.body.mode), type, userId]
     );
 
     return res.json({
@@ -2256,7 +2256,7 @@ app.put("/memories/:id", requireAuth, async (req, res) => {
        SET value = $1, mode = $2, type = $3, updated_at = NOW()
        WHERE id = $4
        RETURNING *`,
-      [value, mode || null, type || null, id]
+      [value, normalizeMemoryMode(mode), type || null, id]
     );
 
     if (result.rows.length === 0) {
@@ -2382,6 +2382,13 @@ function shouldTriggerDetection(messages) {
   }
 
   return false;
+}
+
+function normalizeMemoryMode(m) {
+  if (!m) return 'all';
+  if (m === 'NSFW') return 'after_dark';
+  if (m === 'SFW') return 'sfw';
+  return m;
 }
 
 // POST /detect-memory - Analyze recent messages for memorable facts
