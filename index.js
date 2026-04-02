@@ -530,10 +530,6 @@ function buildMemoryContext(allMemories, mode, messages = []) {
   return sorted.slice(0, 5);
 }
 
-function isNsfwPatchApplied({ mode, pace }) {
-  return mode === "after_dark" && (pace === "TURN_IT_UP" || pace === "AFTER_DARK");
-}
-
 function extractLastUserText(messages) {
   const lastUser = Array.isArray(messages)
     ? [...messages].reverse().find((m) => m && m.role === "user" && typeof m.content === "string")
@@ -541,15 +537,6 @@ function extractLastUserText(messages) {
   return String(lastUser?.content ?? "");
 }
 
-function summarizeRoles(messages) {
-  if (!Array.isArray(messages)) return "not_array";
-  const roles = messages.map((m) => (m && typeof m.role === "string" ? m.role : "bad_role"));
-  const counts = roles.reduce((acc, r) => {
-    acc[r] = (acc[r] || 0) + 1;
-    return acc;
-  }, {});
-  return { total: messages.length, counts };
-}
 
 // Minimal post-gen guard to prevent curt default opener on early turns
 // Post-generation safety net for a known bad opener on the very first turn.
@@ -1622,13 +1609,6 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 
     // Never call the API without a real user message.
     if (!userText.trim()) {
-      if (DEBUG_CHAT) {
-        console.log("[CHAT DEBUG] blocked: no_user_text", {
-          mode,
-          pace,
-          roles: summarizeRoles(messages),
-        });
-      }
       return res.status(400).json({
         ok: false,
         error: "No user message provided (messages empty or missing role:'user').",
@@ -1637,9 +1617,6 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 
     const taboo = violatesHardTaboo(userText);
     if (taboo) {
-      if (DEBUG_CHAT) {
-        console.log("[CHAT DEBUG] blocked: taboo", { mode, pace, taboo });
-      }
       return res.json({
         ok: true,
         reply: "That's not something I do. Let's switch gears.",
@@ -1652,12 +1629,6 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     // After Dark Adult Verification Gate
     // -----------------------------------
     if (mode === "after_dark" && !isAdultVerifiedToken(req)) {
-      if (DEBUG_CHAT) {
-        console.log("[CHAT DEBUG] blocked: after_dark_not_verified", {
-          hasToken: !!req.headers?.authorization,
-          code: extractTokenCode(req),
-        });
-      }
       return res.json({
         ok: true,
         reply: "After Dark mode isn't available on your account. You can switch to SFW in Settings.",
@@ -1709,7 +1680,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 
     const filteredMemories = buildMemoryContext(memories, mode, messages);
     const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext, founder: isFounder });
-    const patchApplied = isNsfwPatchApplied({ mode, pace });
+
 
     // Update last_referenced_at for injected memories (fire-and-forget)
     if (db && filteredMemories.length > 0) {
@@ -1732,24 +1703,6 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
         : 0.7;
 
     const model = "claude-sonnet-4-20250514";
-
-    if (DEBUG_CHAT) {
-      console.log("[CHAT DEBUG] request", {
-        mode,
-        pace,
-        patchApplied,
-        temperature,
-        model,
-        roles: summarizeRoles(messages),
-        userTextLen: userText.length,
-        systemPromptLen: systemPrompt.length,
-        realtimeContext,
-        weatherCached: !!weatherCache.data,
-        hasSummary: !!threadSummary,
-        recentMessagesCount: recentMessages.length,
-        memoriesCount: memories.length,
-      });
-    }
 
     // Append thread summary to system prompt if available
     let fullSystemPrompt = systemPrompt;
@@ -1797,13 +1750,6 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 
     const rawReply = calResponse.reply ?? "(no reply)";
     const reply = softenEarlySnap(rawReply, messages).replace(/—/g, ",");
-
-    if (DEBUG_CHAT) {
-      console.log("[CHAT DEBUG] reply", {
-        replyLen: reply.length,
-        startsWith: reply.slice(0, 80),
-      });
-    }
 
     // Best-effort DB write (never blocks chat)
     if (db) {
@@ -2405,19 +2351,12 @@ app.post("/detect-memory", requireAuth, async (req, res) => {
 
     // PHASE 4: Check if detection should run
     if (!shouldTriggerDetection(messages)) {
-      if (DEBUG_CHAT) {
-        console.log("[DETECT DEBUG] Detection skipped based on context");
-      }
       return res.json({
         ok: true,
         detected: [],
         count: 0,
         skipped: true,
       });
-    }
-
-    if (DEBUG_CHAT) {
-      console.log("[DETECT DEBUG] Analyzing", messages.length, "messages for memories");
     }
 
     // Phase 11.7: Only analyze the most recent user messages
@@ -2442,18 +2381,8 @@ app.post("/detect-memory", requireAuth, async (req, res) => {
       ? recentUserMessages.slice(-1).join(" ")
       : recentUserMessages.join(" ");
 
-    if (DEBUG_CHAT) {
-      console.log("[DETECT DEBUG] Recent user messages:", recentUserMessages);
-      console.log("[DETECT DEBUG] Correction detected:", containsCorrection(combinedRecentText));
-      console.log("[DETECT DEBUG] Detection input:", userMessages);
-    }
-
     // Use heuristic detection on narrowed input
     const detected = detectMemoriesHeuristic(userMessages);
-
-    if (DEBUG_CHAT) {
-      console.log("[DETECT DEBUG] Found", detected.length, "potential memories");
-    }
 
     // Return detected memories for user confirmation
     return res.json({
