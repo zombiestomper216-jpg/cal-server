@@ -158,6 +158,11 @@ Write it the way someone would naturally remember a conversation — warm, human
 Return only the summary text. Nothing else.
 Do not begin the summary with an action beat or asterisk-formatted text. Begin with a narrative sentence about the user or the conversation.`;
 
+const THREAD_TITLE_PROMPT = `You are generating a short title for a conversation.
+Based on the messages provided, write a 3-5 word title that captures the main topic or feeling of the conversation.
+Write it like a chapter title — evocative, not literal. No quotes, no punctuation at the end.
+Return only the title. Nothing else.`;
+
 // -----------------------------------
 // Postgres
 // -----------------------------------
@@ -198,6 +203,11 @@ async function runMigrations() {
     )`,
     `CREATE INDEX IF NOT EXISTS idx_session_summaries_device ON session_summaries (device_id, created_at DESC)`,
     `CREATE INDEX IF NOT EXISTS idx_session_summaries_user ON session_summaries (user_id, created_at DESC)`,
+    `CREATE TABLE IF NOT EXISTS threads (
+      id SERIAL PRIMARY KEY,
+      title VARCHAR,
+      created_at TIMESTAMP DEFAULT NOW()
+    )`,
     // Re-engagement system tables
     `CREATE TABLE IF NOT EXISTS user_activity (
       id SERIAL PRIMARY KEY,
@@ -1593,7 +1603,21 @@ async function generateSummaryText(messages) {
   return completion?.content?.[0]?.text?.trim() || "";
 }
 
-async function generateAndStoreSessionSummary({ messages, mode, deviceId, userId }) {
+async function generateThreadTitle(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return "";
+  const completion = await anthropic.messages.create({
+    model: "claude-sonnet-4-20250514",
+    system: THREAD_TITLE_PROMPT,
+    messages: messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role, content: m.content })),
+    temperature: 0.3,
+    max_tokens: 20,
+  });
+  return completion?.content?.[0]?.text?.trim() || "";
+}
+
+async function generateAndStoreSessionSummary({ messages, mode, deviceId, userId, threadId = null }) {
   const summary = await generateSummaryText(messages);
   if (!summary || !db) return;
 
@@ -1610,6 +1634,13 @@ async function generateAndStoreSessionSummary({ messages, mode, deviceId, userId
      VALUES ($1, $2, $3, $4)`,
     [deviceId, userId, mode, summary]
   );
+
+  if (threadId) {
+    const title = await generateThreadTitle(messages);
+    if (title) {
+      await db.query(`UPDATE threads SET title = $1 WHERE id = $2`, [title, threadId]);
+    }
+  }
 }
 
 // -----------------------------------
@@ -1617,7 +1648,7 @@ async function generateAndStoreSessionSummary({ messages, mode, deviceId, userId
 // -----------------------------------
 app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
   try {
-    const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [] } =
+    const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId = null } =
       req.body;
     const pace = paceFromReq(req.body);
 
@@ -1881,6 +1912,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
         mode,
         deviceId: chatDeviceId,
         userId: chatUserId,
+        threadId,
       }).catch(e => console.warn("[AUTO-SUMMARIZE] Failed:", e?.message));
     }
 
@@ -1923,7 +1955,7 @@ app.post("/summarize", chatLimiter, requireAuth, async (req, res) => {
 // POST /session-summary — generate and store a session continuity summary (upsert, one row per user/device/mode per day)
 app.post("/session-summary", requireAuth, async (req, res) => {
   try {
-    const { messages = [], mode = "sfw", device_id, userId: bodyUserId, deviceId: bodyDeviceId } = req.body;
+    const { messages = [], mode = "sfw", device_id, userId: bodyUserId, deviceId: bodyDeviceId, thread_id: threadId = null } = req.body;
     const userId = parseInt(req.userId || bodyUserId) || null;
     const deviceId = device_id || bodyDeviceId || null;
 
@@ -1939,7 +1971,7 @@ app.post("/session-summary", requireAuth, async (req, res) => {
       return res.status(400).json({ ok: false, error: "messages required" });
     }
 
-    await generateAndStoreSessionSummary({ messages, mode, deviceId, userId });
+    await generateAndStoreSessionSummary({ messages, mode, deviceId, userId, threadId });
 
     return res.json({ success: true });
   } catch (err) {
