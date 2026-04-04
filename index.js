@@ -1862,7 +1862,8 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     }
 
     // Auto-summarize at 50-message threshold (fire-and-forget)
-    if (messages.length % 10 === 0 && db && (chatDeviceId || chatUserId)) {
+    console.log('[SUMMARY DEBUG] messages.length:', messages.length, 'mod10:', messages.length % 10);
+    if (messages.length >= 10 && messages.length % 5 === 0 && db && (chatDeviceId || chatUserId)) {
       generateAndStoreSessionSummary({
         messages,
         mode,
