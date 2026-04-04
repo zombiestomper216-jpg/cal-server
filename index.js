@@ -71,6 +71,8 @@ console.log("BOOT env check:", {
 // -----------------------------------
 // Chicago Weather (OpenWeatherMap)
 // -----------------------------------
+const lastSummaryTime = new Map(); // (chatUserId || chatDeviceId) → timestamp (ms)
+
 let weatherCache = { data: null, fetchedAt: 0 };
 const WEATHER_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 const WEATHER_FETCH_TIMEOUT = 3000; // 3 seconds
@@ -1862,11 +1864,20 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       })();
     }
 
-    // Auto-summarize at 50-message threshold (fire-and-forget)
-    console.log('[SUMMARY DEBUG] messages.length:', messages.length, 'mod10:', messages.length % 10);
-    if (messages.length >= 10 && messages.length % 2 === 1 && db && (chatDeviceId || chatUserId)) {
+    // Auto-summarize every 20 messages, at most once per 5 minutes per user (fire-and-forget)
+    const summaryKey = chatUserId || chatDeviceId;
+    const now = Date.now();
+    const lastSummary = lastSummaryTime.get(summaryKey) ?? 0;
+    if (
+      messages.length > 0 &&
+      messages.length % 20 === 0 &&
+      db &&
+      summaryKey &&
+      now - lastSummary > 5 * 60 * 1000
+    ) {
+      lastSummaryTime.set(summaryKey, now);
       generateAndStoreSessionSummary({
-        messages,
+        messages: messages.slice(-30),
         mode,
         deviceId: chatDeviceId,
         userId: chatUserId,
