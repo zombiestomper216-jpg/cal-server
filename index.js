@@ -1862,7 +1862,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     }
 
     // Auto-summarize at 50-message threshold (fire-and-forget)
-    if (messages.length === 10 && db && (chatDeviceId || chatUserId)) {
+    if (messages.length % 10 === 0 && db && (chatDeviceId || chatUserId)) {
       generateAndStoreSessionSummary({
         messages,
         mode,
