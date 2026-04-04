@@ -2250,6 +2250,27 @@ app.delete("/memories/:id", requireAuth, async (req, res) => {
   }
 });
 
+app.delete("/account", requireAuth, async (req, res) => {
+  const userId = req.userId;
+  if (!userId) {
+    return res.status(400).json({ ok: false, error: "Account deletion requires a user account token." });
+  }
+  if (!db) {
+    return res.status(503).json({ ok: false, error: "Database not available." });
+  }
+  try {
+    await db.query("DELETE FROM memories WHERE user_id = $1", [userId]);
+    await db.query("DELETE FROM session_summaries WHERE user_id = $1", [userId]);
+    await db.query("DELETE FROM re_engagement_messages WHERE user_id = $1", [userId]);
+    await db.query("DELETE FROM user_activity WHERE user_id = $1", [userId]);
+    await db.query("DELETE FROM users WHERE id = $1", [userId]);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE /account error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to delete account." });
+  }
+});
+
 // -----------------------------------
 // Memory Detection Endpoint (Phase 3 + Phase 4 Refinements)
 // -----------------------------------
