@@ -153,7 +153,8 @@ const SESSION_SUMMARY_PROMPT = `You are summarizing a conversation between a use
 Write a 2–4 sentence narrative summary in third person, past tense.
 Capture the emotional tone of the conversation, anything personal the user shared, and where things left off.
 Write it the way someone would naturally remember a conversation — warm, human, no clinical language, no bullet points.
-Return only the summary text. Nothing else.`;
+Return only the summary text. Nothing else.
+Do not begin the summary with an action beat or asterisk-formatted text. Begin with a narrative sentence about the user or the conversation.`;
 
 // -----------------------------------
 // Postgres
