@@ -149,13 +149,11 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-const SESSION_SUMMARY_PROMPT = `You are generating a session continuity summary for an AI companion.
-Capture in under 150 words:
-- The emotional tone of the conversation
-- Main topics discussed
-- Any personal disclosures (name, job, situation, preferences)
-- Where the conversation left off (unfinished threads, last topic)
-Write in third person ("He mentioned...", "They discussed..."). Be factual and concise.`;
+const SESSION_SUMMARY_PROMPT = `You are summarizing a conversation between a user and Cal, an AI companion.
+Write a 2–4 sentence narrative summary in third person, past tense.
+Capture the emotional tone of the conversation, anything personal the user shared, and where things left off.
+Write it the way someone would naturally remember a conversation — warm, human, no clinical language, no bullet points.
+Return only the summary text. Nothing else.`;
 
 // -----------------------------------
 // Postgres
@@ -1141,40 +1139,49 @@ app.post("/redeem-code", authLimiter, async (req, res) => {
       return res.status(409).json({ ok: false, error: "This code has already been used." });
     }
 
-    // Determine founder eligibility
+    // Determine founder eligibility and mark code as used inside a serializable
+    // transaction to prevent two simultaneous redemptions both reading count < 20.
     let founder = false;
-    if (invite.tier === "after_dark") {
-      const countResult = await db.query(
-        "SELECT COUNT(*) AS cnt FROM users WHERE founder = true"
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE");
+
+      if (invite.tier === "after_dark") {
+        const countResult = await client.query(
+          "SELECT COUNT(*) AS cnt FROM users WHERE founder = true"
+        );
+        const founderCount = parseInt(countResult.rows[0].cnt, 10);
+        founder = founderCount < 20;
+      }
+
+      // Mark code as used
+      await client.query(
+        `UPDATE invite_codes
+         SET used = true, used_by_device_id = $1, redeemed_at = NOW(), founder = $2
+         WHERE id = $3`,
+        [device_id, founder, invite.id]
       );
-      const founderCount = parseInt(countResult.rows[0].cnt, 10);
-      founder = founderCount < 20;
-    }
 
-    // Mark code as used
-    await db.query(
-      `UPDATE invite_codes
-       SET used = true, used_by_device_id = $1, redeemed_at = NOW(), founder = $2
-       WHERE id = $3`,
-      [device_id, founder, invite.id]
-    );
-
-    // Best-effort: try to find a user associated with this device_id and set founder
-    if (founder) {
-      try {
-        const userLookup = await db.query(
+      // Best-effort: try to find a user associated with this device_id and set founder
+      if (founder) {
+        const userLookup = await client.query(
           "SELECT DISTINCT user_id FROM user_activity WHERE device_id = $1 AND user_id IS NOT NULL LIMIT 1",
           [device_id]
         );
         if (userLookup.rows.length > 0) {
-          await db.query(
+          await client.query(
             "UPDATE users SET founder = true WHERE id = $1",
             [userLookup.rows[0].user_id]
           );
         }
-      } catch (e) {
-        console.warn("[REDEEM] Best-effort founder user update failed:", e?.message);
       }
+
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      throw e;
+    } finally {
+      client.release();
     }
 
     return res.json({ ok: true, tier: invite.tier, founder });
@@ -1567,6 +1574,42 @@ function dedupeDetectedMemories(memories) {
 }
 
 // -----------------------------------
+// Session Summary Helper
+// -----------------------------------
+async function generateSummaryText(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return "";
+  const completion = await anthropic.messages.create({
+    model: "claude-sonnet-4-20250514",
+    system: SESSION_SUMMARY_PROMPT,
+    messages: messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role, content: m.content })),
+    temperature: 0.3,
+    max_tokens: 200,
+  });
+  return completion?.content?.[0]?.text?.trim() || "";
+}
+
+async function generateAndStoreSessionSummary({ messages, mode, deviceId, userId }) {
+  const summary = await generateSummaryText(messages);
+  if (!summary || !db) return;
+
+  // Upsert: replace today's row for this user/device/mode
+  await db.query(
+    `DELETE FROM session_summaries
+     WHERE (user_id = $1 OR (user_id IS NULL AND device_id = $2))
+       AND mode = $3
+       AND DATE(created_at) = CURRENT_DATE`,
+    [userId, deviceId, mode]
+  );
+  await db.query(
+    `INSERT INTO session_summaries (device_id, user_id, mode, summary)
+     VALUES ($1, $2, $3, $4)`,
+    [deviceId, userId, mode, summary]
+  );
+}
+
+// -----------------------------------
 // Chat Endpoint
 // -----------------------------------
 app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
@@ -1818,6 +1861,16 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       })();
     }
 
+    // Auto-summarize at 50-message threshold (fire-and-forget)
+    if (messages.length === 50 && db && (chatDeviceId || chatUserId)) {
+      generateAndStoreSessionSummary({
+        messages,
+        mode,
+        deviceId: chatDeviceId,
+        userId: chatUserId,
+      }).catch(e => console.warn("[AUTO-SUMMARIZE] Failed:", e?.message));
+    }
+
     return res.json({ ok: true, reply, easterEgg: null });
   } catch (err) {
     console.error("CHAT ERROR:", err);
@@ -1829,68 +1882,19 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 // -----------------------------------
 app.post("/summarize", chatLimiter, requireAuth, async (req, res) => {
   try {
-    const { messages = [], mode = "sfw" } = req.body;
+    const { messages = [], mode = "sfw", userId, deviceId } = req.body;
+    const resolvedUserId = userId ?? req.userId ?? null;
+    const resolvedDeviceId = deviceId ?? null;
 
     if (mode === "after_dark" && !isAdultVerifiedToken(req)) {
-      return res.json({
-        ok: true,
-        blocked: true,
-        reason: "adult_verification_required",
-      });
+      return res.json({ ok: true, blocked: true, reason: "adult_verification_required" });
     }
 
     if (!Array.isArray(messages) || messages.length === 0) {
-      return res.status(400).json({
-        ok: false,
-        error: "Messages array required for summarization",
-      });
+      return res.status(400).json({ ok: false, error: "Messages array required for summarization" });
     }
 
-    if (DEBUG_CHAT) {
-      console.log("[SUMMARIZE DEBUG] request", {
-        messageCount: messages.length,
-        mode,
-      });
-    }
-
-    const conversationText = messages
-      .map((m) => {
-        const speaker = m.role === "user" ? "User" : "Cal";
-        return `${speaker}: ${m.content}`;
-      })
-      .join("\n\n");
-
-    const modeNote =
-      mode === "after_dark"
-        ? "This is an After Dark conversation. Summarize content accurately including mature themes."
-        : "This is an SFW conversation. Keep the summary appropriate and non-explicit.";
-
-    const systemPrompt = `You are summarizing a conversation between the user and Cal (an AI companion).
-
-Create a concise 2-3 sentence summary that captures:
-- Main topics discussed
-- User's current emotional state or context
-- Key preferences or facts mentioned
-
-Keep it brief and factual. This will be used as context for future messages. ${modeNote}`;
-
-    const userPrompt = `Summarize this conversation:\n\n${conversationText}`;
-
-    const completion = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      system: systemPrompt,
-      messages: [{ role: "user", content: userPrompt }],
-      temperature: 0.3,
-      max_tokens: 150,
-    });
-
-    const summary = completion?.content?.[0]?.text ?? "";
-
-    if (DEBUG_CHAT) {
-      console.log("[SUMMARIZE DEBUG] summary generated", {
-        summaryLength: summary.length,
-      });
-    }
+    const summary = await generateSummaryText(messages);
 
     return res.json({ ok: true, summary });
   } catch (err) {
@@ -1903,19 +1907,15 @@ Keep it brief and factual. This will be used as context for future messages. ${m
 // Session Summary Endpoints
 // -----------------------------------
 
-// POST /session-summary — generate and store a session continuity summary
+// POST /session-summary — generate and store a session continuity summary (upsert, one row per user/device/mode per day)
 app.post("/session-summary", requireAuth, async (req, res) => {
   try {
-    const { messages = [], mode = "sfw", device_id } = req.body;
-    const userId = req.userId || null;
-    const deviceId = device_id || null;
+    const { messages = [], mode = "sfw", device_id, userId: bodyUserId, deviceId: bodyDeviceId } = req.body;
+    const userId = parseInt(req.userId || bodyUserId) || null;
+    const deviceId = device_id || bodyDeviceId || null;
 
     if (mode === "after_dark" && !isAdultVerifiedToken(req)) {
-      return res.json({
-        ok: true,
-        blocked: true,
-        reason: "adult_verification_required",
-      });
+      return res.json({ ok: true, blocked: true, reason: "adult_verification_required" });
     }
 
     if (!deviceId && !userId) {
@@ -1926,37 +1926,9 @@ app.post("/session-summary", requireAuth, async (req, res) => {
       return res.status(400).json({ ok: false, error: "messages required" });
     }
 
-    const conversationText = messages
-      .map((m) => {
-        const speaker = m.role === "user" ? "User" : "Cal";
-        return `${speaker}: ${m.content}`;
-      })
-      .join("\n\n");
+    await generateAndStoreSessionSummary({ messages, mode, deviceId, userId });
 
-    const completion = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      system: SESSION_SUMMARY_PROMPT,
-      messages: [{ role: "user", content: conversationText }],
-      temperature: 0.3,
-      max_tokens: 200,
-    });
-
-    const summary = completion?.content?.[0]?.text?.trim() || "";
-
-    // Store in DB (best-effort)
-    if (db && summary) {
-      try {
-        await db.query(
-          `INSERT INTO session_summaries (device_id, user_id, mode, summary)
-           VALUES ($1, $2, $3, $4)`,
-          [deviceId, userId, mode, summary]
-        );
-      } catch (e) {
-        console.warn("[SESSION] Summary store failed:", e?.message);
-      }
-    }
-
-    return res.json({ ok: true, summary });
+    return res.json({ success: true });
   } catch (err) {
     console.error("SESSION SUMMARY ERROR:", err);
     return res.status(500).json({ ok: false, error: "Session summary generation failed" });
