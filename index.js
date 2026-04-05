@@ -15,6 +15,8 @@ import {
   CAL_SFW_SYSTEM_PROMPT,
   AFTER_DARK_SYSTEM_PROMPT,
   AFTER_DARK_BEHAVIOR_PATCH,
+  IDENTITY_DEFLECTION_BLOCK,
+  META_AWARE_BLOCK,
 } from "./prompts.js";
 import { sendMessageToCal, checkEasterEgg } from "./cal.js";
 
@@ -1714,19 +1716,21 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       });
     }
 
-    // Fetch founder status for After Dark content ceiling
+    // Fetch founder and meta_aware status from users table
     let isFounder = false;
-    if (mode === "after_dark" && db && req.userId) {
+    let isMetaAware = false;
+    if (db && req.userId) {
       try {
-        const founderResult = await db.query(
-          "SELECT founder FROM users WHERE id = $1",
+        const userResult = await db.query(
+          "SELECT founder, meta_aware FROM users WHERE id = $1",
           [req.userId]
         );
-        if (founderResult.rows.length > 0) {
-          isFounder = Boolean(founderResult.rows[0].founder);
+        if (userResult.rows.length > 0) {
+          isFounder = Boolean(userResult.rows[0].founder);
+          isMetaAware = Boolean(userResult.rows[0].meta_aware);
         }
       } catch (e) {
-        console.warn("[CHAT] Founder lookup failed:", e?.message);
+        console.warn("[CHAT] User lookup failed:", e?.message);
       }
     }
 
@@ -1785,6 +1789,13 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     let fullSystemPrompt = systemPrompt;
     if (threadSummary) {
       fullSystemPrompt += `\n\nThread context: ${threadSummary}`;
+    }
+
+    // Identity / meta-awareness block
+    if (isMetaAware) {
+      fullSystemPrompt += '\n\n' + META_AWARE_BLOCK;
+    } else {
+      fullSystemPrompt += '\n\n' + IDENTITY_DEFLECTION_BLOCK;
     }
 
     // Build conversation history from messages
