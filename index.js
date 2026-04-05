@@ -1650,7 +1650,7 @@ async function generateAndStoreSessionSummary({ messages, mode, deviceId, userId
 // -----------------------------------
 app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
   try {
-    const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId = null } =
+    const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId = null, imageBase64 = null, imageMimeType = null } =
       req.body;
     const pace = paceFromReq(req.body);
 
@@ -1822,6 +1822,28 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
         return { role: "user", content: m.content };
       })
       .filter(Boolean);
+
+    // When an image is provided, upgrade the last user message to a multimodal content array
+    if (imageBase64 && conversationHistory.length > 0) {
+      const lastIdx = conversationHistory.length - 1;
+      const lastMsg = conversationHistory[lastIdx];
+      if (lastMsg.role === "user") {
+        conversationHistory[lastIdx] = {
+          ...lastMsg,
+          content: [
+            {
+              type: "image",
+              source: {
+                type: "base64",
+                media_type: imageMimeType || "image/jpeg",
+                data: imageBase64
+              }
+            },
+            { type: "text", text: lastMsg.content }
+          ]
+        };
+      }
+    }
 
     if (DEBUG_CHAT) {
       console.log(
