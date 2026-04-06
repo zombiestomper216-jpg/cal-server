@@ -1656,6 +1656,9 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     console.log('[BODY DEBUG] imageBase64 type:', typeof req.body.imageBase64);
     console.log('[BODY DEBUG] body size approx:', JSON.stringify(req.body).length);
     console.log('[IMAGE DEBUG] imageBase64 received:', !!imageBase64, 'length:', imageBase64?.length ?? 0);
+    if (imageBase64 && imageBase64.length > 4000000) {
+      return res.status(400).json({ error: 'Image too large. Please use a smaller image.' });
+    }
     const pace = paceFromReq(req.body);
 
     // Start weather fetch early (runs concurrently with DB queries)
