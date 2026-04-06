@@ -1652,6 +1652,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
   try {
     const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId = null, imageBase64 = null, imageMimeType = null } =
       req.body;
+    console.log('[IMAGE DEBUG] imageBase64 received:', !!imageBase64, 'length:', imageBase64?.length ?? 0);
     const pace = paceFromReq(req.body);
 
     // Start weather fetch early (runs concurrently with DB queries)
