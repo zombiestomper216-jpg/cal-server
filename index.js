@@ -1652,6 +1652,9 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
   try {
     const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId = null, imageBase64 = null, imageMimeType = null } =
       req.body;
+    console.log('[BODY DEBUG] keys in req.body:', Object.keys(req.body));
+    console.log('[BODY DEBUG] imageBase64 type:', typeof req.body.imageBase64);
+    console.log('[BODY DEBUG] body size approx:', JSON.stringify(req.body).length);
     console.log('[IMAGE DEBUG] imageBase64 received:', !!imageBase64, 'length:', imageBase64?.length ?? 0);
     const pace = paceFromReq(req.body);
 
