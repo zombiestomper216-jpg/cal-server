@@ -543,7 +543,6 @@ function buildMemoryContext(allMemories, mode, messages = []) {
 
   // Selective recall: 3-5 memories max
   const selected = sorted.slice(0, 5);
-  console.log("[MEMORY CONTEXT DEBUG] input:", allMemories.length, "| mode-filtered:", filtered.length, "| returned keys:", selected.map(m => m.key));
   return selected;
 }
 
@@ -2126,8 +2125,6 @@ app.get("/memories", requireAuth, async (req, res) => {
     query += " ORDER BY created_at DESC";
 
     const result = await db.query(query, params);
-
-    console.log("[MEMORIES DEBUG] count:", result.rows.length, "keys:", result.rows.map(r => r.key));
 
     return res.json({
       ok: true,
