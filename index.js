@@ -1732,18 +1732,20 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       );
     }
 
-    // Fetch founder and meta_aware status from users table
+    // Fetch founder, meta_aware, and cloud_messages status from users table
     let isFounder = false;
     let isMetaAware = false;
+    let cloudMessages = false;
     if (db && req.userId) {
       try {
         const userResult = await db.query(
-          "SELECT founder, meta_aware FROM users WHERE id = $1",
+          "SELECT founder, meta_aware, cloud_messages FROM users WHERE id = $1",
           [req.userId]
         );
         if (userResult.rows.length > 0) {
           isFounder = Boolean(userResult.rows[0].founder);
           isMetaAware = Boolean(userResult.rows[0].meta_aware);
+          cloudMessages = Boolean(userResult.rows[0].cloud_messages);
         }
       } catch (e) {
         console.warn("[CHAT] User lookup failed:", e?.message);
@@ -1963,6 +1965,20 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
         userId: chatUserId,
         threadId,
       }).catch(e => console.warn("[AUTO-SUMMARIZE] Failed:", e?.message));
+    }
+
+    // Cloud message storage (fire-and-forget, only for cloud_messages users)
+    if (db && cloudMessages && req.userId && req.body.thread_id) {
+      const msgThreadId = req.body.thread_id;
+      const msgUserId = req.userId;
+      const msgMode = req.body.mode || mode;
+      const saveMsg = (role, content) =>
+        db.query(
+          `INSERT INTO messages (thread_id, user_id, role, content, mode, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`,
+          [msgThreadId, msgUserId, role, content, msgMode]
+        ).catch(e => console.warn("[CLOUD-MSG] Save failed:", e?.message));
+      saveMsg("user", userText);
+      saveMsg("assistant", reply);
     }
 
     return res.json({ ok: true, reply, easterEgg: null });
@@ -2721,6 +2737,57 @@ app.patch("/users/me/notifications", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("PATCH /users/me/notifications error:", err);
     return res.status(500).json({ ok: false, error: "Failed to update notification preference." });
+  }
+});
+
+// -----------------------------------
+// Cloud Message Storage
+// -----------------------------------
+app.get("/messages/:threadId", requireAuth, async (req, res) => {
+  try {
+    if (!db) return res.status(503).json({ ok: false, error: "Database unavailable." });
+    const userResult = await db.query(
+      "SELECT cloud_messages FROM users WHERE id = $1",
+      [req.userId]
+    );
+    if (!userResult.rows.length || !userResult.rows[0].cloud_messages) {
+      return res.status(403).json({ ok: false, error: "Cloud messages not enabled for this account." });
+    }
+    const { threadId } = req.params;
+    const result = await db.query(
+      "SELECT * FROM messages WHERE thread_id = $1 AND user_id = $2 ORDER BY created_at ASC",
+      [threadId, req.userId]
+    );
+    return res.json({ ok: true, messages: result.rows });
+  } catch (err) {
+    console.error("GET /messages/:threadId error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to fetch messages." });
+  }
+});
+
+app.post("/messages", requireAuth, async (req, res) => {
+  try {
+    if (!db) return res.status(503).json({ ok: false, error: "Database unavailable." });
+    const userResult = await db.query(
+      "SELECT cloud_messages FROM users WHERE id = $1",
+      [req.userId]
+    );
+    if (!userResult.rows.length || !userResult.rows[0].cloud_messages) {
+      return res.status(403).json({ ok: false, error: "Cloud messages not enabled for this account." });
+    }
+    const { threadId, role, content, mode } = req.body;
+    if (!threadId || !role || !content) {
+      return res.status(400).json({ ok: false, error: "threadId, role, and content are required." });
+    }
+    const result = await db.query(
+      `INSERT INTO messages (thread_id, user_id, role, content, mode, created_at)
+       VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING *`,
+      [threadId, req.userId, role, content, mode || null]
+    );
+    return res.json({ ok: true, message: result.rows[0] });
+  } catch (err) {
+    console.error("POST /messages error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to save message." });
   }
 });
 

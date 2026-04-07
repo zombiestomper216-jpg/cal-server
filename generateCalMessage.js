@@ -55,5 +55,20 @@ export async function generateCalMessage(user) {
     messages: [{ role: "user", content: "generate" }],
   });
 
-  return response.content[0].text.trim();
+  const message = response.content[0].text.trim();
+
+  // Save notification message to cloud storage if enabled
+  if (user.cloud_messages && user.primary_thread_id) {
+    try {
+      await db.query(
+        `INSERT INTO messages (thread_id, user_id, role, content, mode, created_at)
+         VALUES ($1, $2, 'assistant', $3, 'after_dark', NOW())`,
+        [user.primary_thread_id, user.id, message]
+      );
+    } catch (e) {
+      console.warn("[NOTIF] Cloud message save failed:", e.message);
+    }
+  }
+
+  return message;
 }
