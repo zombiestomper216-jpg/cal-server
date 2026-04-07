@@ -542,7 +542,9 @@ function buildMemoryContext(allMemories, mode, messages = []) {
   });
 
   // Selective recall: 3-5 memories max
-  return sorted.slice(0, 5);
+  const selected = sorted.slice(0, 5);
+  console.log("[MEMORY CONTEXT DEBUG] input:", allMemories.length, "| mode-filtered:", filtered.length, "| returned keys:", selected.map(m => m.key));
+  return selected;
 }
 
 function extractLastUserText(messages) {
