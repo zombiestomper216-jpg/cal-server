@@ -19,6 +19,8 @@ import {
   META_AWARE_BLOCK,
 } from "./prompts.js";
 import { sendMessageToCal, checkEasterEgg } from "./cal.js";
+import { generateCalMessage } from "./generateCalMessage.js";
+import { start as startNotificationScheduler } from "./notificationScheduler.js";
 
 dotenv.config();
 
@@ -1723,6 +1725,13 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       });
     }
 
+    // Update last_active_at for push notification scheduling
+    if (db && req.userId) {
+      db.query("UPDATE users SET last_active_at = NOW() WHERE id = $1", [req.userId]).catch((e) =>
+        console.warn("[CHAT] last_active_at update failed:", e.message)
+      );
+    }
+
     // Fetch founder and meta_aware status from users table
     let isFounder = false;
     let isMetaAware = false;
@@ -2676,6 +2685,87 @@ app.post("/reengagement/:id/delivered", requireAuth, async (req, res) => {
 });
 
 // -----------------------------------
+// Push Token Registration
+// -----------------------------------
+app.post("/push-token", requireAuth, async (req, res) => {
+  try {
+    if (!req.userId) {
+      return res.status(400).json({ ok: false, error: "User ID required. Use a JWT token." });
+    }
+    const { pushToken } = req.body;
+    if (!pushToken || typeof pushToken !== "string") {
+      return res.status(400).json({ ok: false, error: "pushToken is required." });
+    }
+    await db.query("UPDATE users SET push_token = $1 WHERE id = $2", [pushToken, req.userId]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("POST /push-token error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to save push token." });
+  }
+});
+
+// -----------------------------------
+// Notification Preferences
+// -----------------------------------
+app.patch("/users/me/notifications", requireAuth, async (req, res) => {
+  try {
+    if (!req.userId) {
+      return res.status(400).json({ ok: false, error: "User ID required. Use a JWT token." });
+    }
+    const { enabled } = req.body;
+    if (typeof enabled !== "boolean") {
+      return res.status(400).json({ ok: false, error: "enabled (boolean) is required." });
+    }
+    await db.query("UPDATE users SET notifications_enabled = $1 WHERE id = $2", [enabled, req.userId]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("PATCH /users/me/notifications error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to update notification preference." });
+  }
+});
+
+// -----------------------------------
+// Admin: Manual Notification Trigger (testing only)
+// -----------------------------------
+app.post("/admin/trigger-notification", async (req, res) => {
+  try {
+    const authHeader = String(req.headers?.authorization || "");
+    const adminSecret = process.env.ADMIN_SECRET;
+    if (!adminSecret || authHeader !== `Bearer ${adminSecret}`) {
+      return res.status(401).json({ ok: false, error: "Unauthorized." });
+    }
+    const { userId } = req.body;
+    if (!userId) {
+      return res.status(400).json({ ok: false, error: "userId is required." });
+    }
+    const { rows } = await db.query("SELECT * FROM users WHERE id = $1", [userId]);
+    if (!rows[0]) {
+      return res.status(404).json({ ok: false, error: "User not found." });
+    }
+    const user = rows[0];
+    if (!user.push_token) {
+      return res.status(400).json({ ok: false, error: "No push token registered for this user." });
+    }
+    const message = await generateCalMessage(user);
+    await fetch("https://exp.host/--/api/v2/push/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        to: user.push_token,
+        title: "Cal",
+        body: message,
+        data: { screen: "Chat" },
+      }),
+    });
+    await db.query("UPDATE users SET last_notification_at = NOW() WHERE id = $1", [user.id]);
+    return res.json({ ok: true, message });
+  } catch (err) {
+    console.error("POST /admin/trigger-notification error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to send notification." });
+  }
+});
+
+// -----------------------------------
 // Start Server (Railway expects process.env.PORT)
 // -----------------------------------
 const resolvedPort = Number(process.env.PORT);
@@ -2684,6 +2774,8 @@ const PORT = Number.isFinite(resolvedPort) ? resolvedPort : 8080;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🔥 Cal server listening on 0.0.0.0:${PORT}`);
 });
+
+startNotificationScheduler();
 
 // Keepalive log (helps confirm it isn't being killed)
 if (DEBUG_CHAT) {
