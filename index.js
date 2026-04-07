@@ -2721,6 +2721,24 @@ app.post("/push-token", requireAuth, async (req, res) => {
 });
 
 // -----------------------------------
+// Current User
+// -----------------------------------
+app.get("/users/me", requireAuth, async (req, res) => {
+  try {
+    if (!db) return res.status(503).json({ ok: false, error: "Database unavailable." });
+    const result = await db.query(
+      "SELECT id, cloud_messages, primary_thread_id FROM users WHERE id = $1",
+      [req.userId]
+    );
+    if (!result.rows.length) return res.status(404).json({ ok: false, error: "User not found." });
+    return res.json({ ok: true, user: result.rows[0] });
+  } catch (err) {
+    console.error("GET /users/me error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to fetch user." });
+  }
+});
+
+// -----------------------------------
 // Notification Preferences
 // -----------------------------------
 app.patch("/users/me/notifications", requireAuth, async (req, res) => {
