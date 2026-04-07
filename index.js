@@ -2125,6 +2125,8 @@ app.get("/memories", requireAuth, async (req, res) => {
 
     const result = await db.query(query, params);
 
+    console.log("[MEMORIES DEBUG] count:", result.rows.length, "keys:", result.rows.map(r => r.key));
+
     return res.json({
       ok: true,
       memories: result.rows,
