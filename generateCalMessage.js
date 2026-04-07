@@ -20,13 +20,13 @@ export async function generateCalMessage(user) {
     "utf8"
   );
 
-  // Query 5 most recent memories via device_id
+  // Query 5 most recent memories via user_id
   let memories = [];
-  if (user.device_id) {
+  if (user.id) {
     try {
       const result = await db.query(
-        "SELECT key, value FROM memories WHERE device_id = $1 ORDER BY created_at DESC LIMIT 5",
-        [user.device_id]
+        "SELECT key, value FROM memories WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5",
+        [user.id]
       );
       memories = result.rows;
     } catch (e) {
