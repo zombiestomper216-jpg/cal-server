@@ -9,6 +9,19 @@ const EXPO_PUSH_URL = "https://exp.host/--/api/v2/push/send";
 async function sendNotification(user) {
   const message = await generateCalMessage(user);
 
+  let threadId = user.primary_thread_id ?? null;
+  if (!threadId && user.id !== 3) {
+    try {
+      const { rows } = await db.query(
+        "SELECT thread_id FROM messages WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1",
+        [user.id]
+      );
+      threadId = rows[0]?.thread_id ?? null;
+    } catch (e) {
+      console.warn(`[NOTIF] Thread lookup failed for user ${user.id}:`, e.message);
+    }
+  }
+
   await fetch(EXPO_PUSH_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -16,7 +29,7 @@ async function sendNotification(user) {
       to: user.push_token,
       title: "Cal",
       body: message,
-      data: { screen: "Chat" },
+      data: { screen: "Chat", threadId },
     }),
   });
 
