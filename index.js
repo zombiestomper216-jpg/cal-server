@@ -1804,11 +1804,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 
     const model = "claude-sonnet-4-20250514";
 
-    // Append thread summary to system prompt if available
     let fullSystemPrompt = systemPrompt;
-    if (threadSummary) {
-      fullSystemPrompt += `\n\nThread context: ${threadSummary}`;
-    }
 
     // Identity / meta-awareness block
     if (isMetaAware) {
@@ -1817,10 +1813,13 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       fullSystemPrompt += '\n\n' + IDENTITY_DEFLECTION_BLOCK;
     }
 
+    // Cap history to last 30 messages before building conversation
+    const cappedMessages = messages.slice(-30);
+
     // Build conversation history from messages
     let chatMessages = [];
     if (threadSummary && recentMessages.length > 0) {
-      const olderMessages = messages.slice(0, -recentMessages.length);
+      const olderMessages = cappedMessages.slice(0, -recentMessages.length);
       chatMessages = [
         ...olderMessages,
         ...recentMessages.map((m) => ({
@@ -1829,7 +1828,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
         })),
       ];
     } else {
-      chatMessages = [...messages];
+      chatMessages = [...cappedMessages];
     }
 
     // Normalize to user/assistant only (system prompt passed separately to Anthropic)
