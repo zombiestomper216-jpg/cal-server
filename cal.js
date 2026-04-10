@@ -24,6 +24,12 @@ export async function sendMessageToCal({
     messages: conversationHistory,
   });
 
+  console.log('[TOKENS]', {
+    input: response.usage.input_tokens,
+    output: response.usage.output_tokens,
+    total: response.usage.input_tokens + response.usage.output_tokens
+  });
+
   const reply = response.content[0].text;
 
   return {

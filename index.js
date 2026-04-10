@@ -1605,6 +1605,7 @@ async function generateSummaryText(messages) {
     temperature: 0.3,
     max_tokens: 200,
   });
+  console.log('[TOKENS]', { input: completion.usage.input_tokens, output: completion.usage.output_tokens, total: completion.usage.input_tokens + completion.usage.output_tokens });
   return completion?.content?.[0]?.text?.trim() || "";
 }
 
@@ -1619,6 +1620,7 @@ async function generateThreadTitle(messages) {
     temperature: 0.3,
     max_tokens: 20,
   });
+  console.log('[TOKENS]', { input: completion.usage.input_tokens, output: completion.usage.output_tokens, total: completion.usage.input_tokens + completion.usage.output_tokens });
   return completion?.content?.[0]?.text?.trim() || "";
 }
 
@@ -1813,8 +1815,8 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       fullSystemPrompt += '\n\n' + IDENTITY_DEFLECTION_BLOCK;
     }
 
-    // Cap history to last 30 messages before building conversation
-    const cappedMessages = messages.slice(-30);
+    // Cap history to last 40 messages before building conversation
+    const cappedMessages = messages.slice(-40);
 
     // Build conversation history from messages
     let chatMessages = [];
@@ -2582,6 +2584,7 @@ async function generateReEngagement(deviceId, userId, mode) {
     temperature: 0.85,
     max_tokens: 150,
   });
+  console.log('[TOKENS]', { input: completion.usage.input_tokens, output: completion.usage.output_tokens, total: completion.usage.input_tokens + completion.usage.output_tokens });
 
   const content = completion?.content?.[0]?.text?.trim();
   if (!content) return;
