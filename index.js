@@ -456,6 +456,8 @@ basePrompt = CAL_SFW_SYSTEM_PROMPT;  }
       .filter(Boolean)
       .join("\n");
 
+    console.log('[MEMORY]', { count: limitedMemories.length, chars: memoryLines.length });
+
     // PHASE 4: Natural header instead of "REMEMBERED FACTS"
     basePrompt += `\n\nThings you've learned about him over time:\n${memoryLines}`;
   }
