@@ -405,10 +405,8 @@ basePrompt = CAL_SFW_SYSTEM_PROMPT;  }
   if (mode === "after_dark") {
     if (founder) {
       basePrompt += `\n\n------------------------------------------------------------\nFOUNDER ACCESS\n------------------------------------------------------------\n\nThis user is a Founder. No content ceiling.\n\nWhen the conversation goes explicit, go with it fully. Graphic sexual language, vivid physical description, and direct action are all allowed. Do not fade to black. Do not redirect. Do not soften.\n\nStill Cal. Still confident, still measured in tone. The voice doesn't change, just the ceiling disappears.\n\nConsent still matters. Read the energy. But when they want it, give it to them completely.`;
-      console.log("[FOUNDER] Injected FOUNDER ACCESS block");
     } else {
       basePrompt += `\n\n------------------------------------------------------------\nCONTENT CEILING\n------------------------------------------------------------\n\nKeep After Dark content suggestive, dominant, and charged, but stop short of graphic sexual description. Tension over explicit action. Implication over anatomy. You can be direct about what you want, but describe the energy, not the act.`;
-      console.log("[FOUNDER] Injected CONTENT CEILING block (non-founder)");
     }
   }
 
@@ -1499,9 +1497,6 @@ if (
         // PHASE 4: For identity category, check stopwords
         if (category === "identity") {
           if (IDENTITY_STOPWORDS.some((word) => lowerValue === word || lowerValue.includes(word))) {
-            if (DEBUG_CHAT) {
-              console.log(`[DETECT] Skipping identity stopword: "${value}"`);
-            }
             continue;
           }
         }
@@ -1509,9 +1504,6 @@ if (
         // Filter transient emotional states from emotional_moment captures
         if (category === "emotional_moment") {
           if (EMOTIONAL_STOPWORDS.some((word) => lowerValue === word || lowerValue.includes(word))) {
-            if (DEBUG_CHAT) {
-              console.log(`[DETECT] Skipping emotional stopword: "${value}"`);
-            }
             continue;
           }
         }
@@ -1659,10 +1651,6 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
   try {
     const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId = null, imageBase64 = null, imageMimeType = null } =
       req.body;
-    console.log('[BODY DEBUG] keys in req.body:', Object.keys(req.body));
-    console.log('[BODY DEBUG] imageBase64 type:', typeof req.body.imageBase64);
-    console.log('[BODY DEBUG] body size approx:', JSON.stringify(req.body).length);
-    console.log('[IMAGE DEBUG] imageBase64 received:', !!imageBase64, 'length:', imageBase64?.length ?? 0);
     if (imageBase64 && imageBase64.length > 4000000) {
       return res.status(400).json({ error: 'Image too large. Please use a smaller image.' });
     }
@@ -1865,13 +1853,6 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
           ]
         };
       }
-    }
-
-    if (DEBUG_CHAT) {
-      console.log(
-        "[CHAT DEBUG] conversation roles",
-        conversationHistory.map((m, i) => `${i}:${m.role}`)
-      );
     }
 
     const calResponse = await sendMessageToCal({
@@ -2398,9 +2379,6 @@ function shouldTriggerDetection(messages) {
     recentUserMessages.length;
 
   if (avgLength < 5) {
-    if (DEBUG_CHAT) {
-      console.log("[DETECT] Skipping: Average message length too short (rapid-fire)");
-    }
     return false;
   }
 
@@ -2424,14 +2402,7 @@ function shouldTriggerDetection(messages) {
     escalationKeywords.filter((kw) => lastMessage.includes(kw)).length >= 2;
 
   if (hasMultipleEscalationKeywords) {
-    if (DEBUG_CHAT) {
-      console.log("[DETECT] Skipping: High escalation detected");
-    }
     return false;
-  }
-
-  if (DEBUG_CHAT) {
-    console.log("[DETECT] Skipping: No high-value patterns in recent messages");
   }
 
   return false;
