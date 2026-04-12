@@ -2854,11 +2854,14 @@ app.post("/admin/trigger-notification", async (req, res) => {
 
 // POST /voice/synthesize — ElevenLabs TTS (founder only)
 app.post("/voice/synthesize", requireAuth, async (req, res) => {
-  const { text, user_id } = req.body;
+  let { text, user_id } = req.body;
 
   if (!text || !user_id) {
     return res.status(400).json({ error: "text and user_id are required" });
   }
+
+  text = text.replace(/\*[^*]*\*/g, '').replace(/\n{2,}/g, '\n').trim();
+  if (!text) return res.status(400).json({ error: 'No speakable text after stripping action beats' });
 
   try {
     const result = await db.query(
