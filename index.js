@@ -2826,6 +2826,59 @@ app.post("/admin/trigger-notification", async (req, res) => {
   }
 });
 
+// POST /voice/synthesize — ElevenLabs TTS (founder only)
+app.post("/voice/synthesize", requireAuth, async (req, res) => {
+  const { text, user_id } = req.body;
+
+  if (!text || !user_id) {
+    return res.status(400).json({ error: "text and user_id are required" });
+  }
+
+  try {
+    const result = await db.query(
+      "SELECT founder FROM users WHERE id = $1",
+      [user_id]
+    );
+
+    if (result.rows.length === 0 || !result.rows[0].founder) {
+      return res.status(403).json({ error: "Voice is a founder feature" });
+    }
+
+    const elevenRes = await fetch(
+      "https://api.elevenlabs.io/v1/text-to-speech/S6P2anZqaDdE5ISBo5Bb",
+      {
+        method: "POST",
+        headers: {
+          "xi-api-key": process.env.ELEVENLABS_API_KEY,
+          "Content-Type": "application/json",
+          Accept: "audio/mpeg",
+        },
+        body: JSON.stringify({
+          text,
+          model_id: "eleven_monolingual_v1",
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.75,
+          },
+        }),
+      }
+    );
+
+    if (!elevenRes.ok) {
+      const errText = await elevenRes.text();
+      console.error("[voice] ElevenLabs error:", elevenRes.status, errText);
+      return res.status(502).json({ error: "Voice synthesis failed" });
+    }
+
+    res.setHeader("Content-Type", "audio/mpeg");
+    const audioBuffer = await elevenRes.arrayBuffer();
+    res.send(Buffer.from(audioBuffer));
+  } catch (err) {
+    console.error("[voice] Unexpected error:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // -----------------------------------
 // Start Server (Railway expects process.env.PORT)
 // -----------------------------------
