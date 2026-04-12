@@ -882,6 +882,7 @@ app.post("/auth", authLimiter, async (req, res) => {
     }
 
     const token = signJwt(user.id, user.adult_verified, user.founder);
+    console.log('[AUTH] signJwt founder value:', user.founder);
 
     return res.json({
       ok: true,
