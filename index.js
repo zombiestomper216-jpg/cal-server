@@ -633,10 +633,10 @@ function makeSessionToken(prefix) {
   return `${prefix}.${Date.now()}.${crypto.randomBytes(8).toString("hex")}`;
 }
 
-function signJwt(userId, adultVerified) {
+function signJwt(userId, adultVerified, founder = false) {
   if (!JWT_SECRET) throw new Error("JWT_SECRET not configured");
   return jwt.sign(
-    { sub: userId, capability: adultVerified ? "after_dark" : "sfw", adult: adultVerified },
+    { sub: userId, capability: adultVerified ? "after_dark" : "sfw", adult: adultVerified, founder: Boolean(founder) },
     JWT_SECRET,
     { expiresIn: "30d" }
   );
@@ -748,6 +748,7 @@ function requireAuth(req, res, next) {
   if (jwtPayload && jwtPayload.sub) {
     req.userId = jwtPayload.sub;
     req.adultVerified = Boolean(jwtPayload.adult);
+    req.founder = Boolean(jwtPayload.founder);
     return next();
   }
 
@@ -880,7 +881,7 @@ app.post("/auth", authLimiter, async (req, res) => {
       otherDeviceIds = otherDeviceCheck.rows.map(r => r.device_id);
     }
 
-    const token = signJwt(user.id, user.adult_verified);
+    const token = signJwt(user.id, user.adult_verified, user.founder);
 
     return res.json({
       ok: true,
@@ -961,7 +962,7 @@ app.post("/signup", authLimiter, async (req, res) => {
       }
     }
 
-    const token = signJwt(user.id, user.adult_verified);
+    const token = signJwt(user.id, user.adult_verified, user.founder);
 
     return res.json({
       ok: true,
@@ -1062,7 +1063,7 @@ app.post("/login", authLimiter, async (req, res) => {
       otherDeviceIds = otherDeviceCheck.rows.map(r => r.device_id);
     }
 
-    const token = signJwt(user.id, user.adult_verified);
+    const token = signJwt(user.id, user.adult_verified, user.founder);
 
     return res.json({
       ok: true,
