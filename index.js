@@ -70,6 +70,7 @@ console.log("BOOT env check:", {
   hasResend: Boolean(process.env.RESEND_API_KEY),
   hasWeatherKey: Boolean(process.env.OPENWEATHER_API_KEY),
   hasAdminSecret: Boolean(process.env.ADMIN_SECRET),
+  hasElevenLabsKey: !!process.env.ELEVENLABS_API_KEY,
 });
 
 // -----------------------------------
