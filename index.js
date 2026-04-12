@@ -2786,6 +2786,28 @@ app.post("/messages", requireAuth, async (req, res) => {
   }
 });
 
+app.get("/threads", requireAuth, async (req, res) => {
+  try {
+    if (!db) return res.status(503).json({ ok: false, error: "Database unavailable." });
+    const result = await db.query(
+      `SELECT thread_id,
+              COUNT(*) as message_count,
+              MAX(created_at) as last_message_at,
+              MIN(created_at) as first_message_at
+       FROM messages
+       WHERE user_id = $1
+       GROUP BY thread_id
+       ORDER BY MAX(created_at) DESC
+       LIMIT 10`,
+      [req.userId]
+    );
+    return res.json({ ok: true, threads: result.rows });
+  } catch (err) {
+    console.error("GET /threads error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to fetch threads." });
+  }
+});
+
 // -----------------------------------
 // Admin: Manual Notification Trigger (testing only)
 // -----------------------------------
