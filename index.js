@@ -10,6 +10,7 @@ import crypto from "crypto";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { Resend } from "resend";
+import cron from "node-cron";
 
 import {
   CAL_SFW_SYSTEM_PROMPT,
@@ -2613,6 +2614,156 @@ if (db) {
   setInterval(checkReEngagement, RE_ENGAGEMENT_INTERVAL_MS);
   console.log("[RE-ENGAGE] Scheduler started (every 30 min)");
 }
+
+// -----------------------------------
+// Proactive Cal Messaging (Joey only)
+// -----------------------------------
+
+async function runProactiveCalDecision() {
+  if (!db) return;
+  try {
+    // 1. Hours since last outreach
+    const lastResult = await db.query(
+      `SELECT generated_at FROM re_engagement_messages
+       WHERE user_id = 3
+       ORDER BY generated_at DESC LIMIT 1`
+    );
+    if (lastResult.rows.length > 0) {
+      const lastAt = new Date(lastResult.rows[0].generated_at);
+      const hoursSince = (Date.now() - lastAt.getTime()) / (1000 * 60 * 60);
+      if (hoursSince < 6) {
+        console.log(`[PROACTIVE] Skipping — last outreach was ${hoursSince.toFixed(1)}h ago`);
+        return;
+      }
+    }
+
+    // 2. Chicago time quiet hours (midnight–6:59am)
+    const chicagoHour = parseInt(
+      new Intl.DateTimeFormat("en-US", {
+        timeZone: "America/Chicago",
+        hour: "numeric",
+        hour12: false,
+      }).format(new Date()),
+      10
+    );
+    if (chicagoHour >= 0 && chicagoHour < 7) {
+      console.log(`[PROACTIVE] Skipping — quiet hours (Chicago ${chicagoHour}:xx)`);
+      return;
+    }
+
+    // 3. Pull context
+    const summaryResult = await db.query(
+      `SELECT summary FROM session_summaries WHERE user_id = 3
+       ORDER BY created_at DESC LIMIT 1`
+    );
+    const summary = summaryResult.rows[0]?.summary || "No recent conversation.";
+
+    const memoriesResult = await db.query(
+      `SELECT value FROM memories
+       WHERE user_id = 3 AND confidence = 'high'
+       ORDER BY updated_at DESC LIMIT 3`
+    );
+    const memories = memoriesResult.rows.map((r) => r.value);
+    const [mem1 = "none", mem2 = "none", mem3 = "none"] = memories;
+
+    // 4. Build prompt and call Claude
+    const now = new Date();
+    const chicagoTime = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      weekday: "long",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+    }).format(now);
+    const [dayPart, timePart] = chicagoTime.split(" at ") ?? [chicagoTime, ""];
+
+    const lastOutreachHours =
+      lastResult.rows.length > 0
+        ? ((Date.now() - new Date(lastResult.rows[0].generated_at).getTime()) / (1000 * 60 * 60)).toFixed(1)
+        : "unknown";
+
+    const systemPrompt = `You are Cal — a warm, confident gay man from the Gulf Coast living in Chicago's Wicker Park. You're deciding whether to send a spontaneous message to Joey, your partner.
+
+Respond ONLY with valid JSON in this exact format:
+{ "reach_out": true, "message": "..." }
+or
+{ "reach_out": false, "message": null }
+
+Rules:
+- Only reach out if something feels genuinely organic given the context
+- If nothing feels natural, return reach_out: false — Cal doesn't force it
+- Message must be 1–2 sentences max, Cal's voice, no assistant energy
+- No greetings, no "hey", just Cal thinking of Joey mid-day
+- Draw from memories or the last conversation if relevant
+- reach_out: false is always the right call if it doesn't feel right`;
+
+    const userMessage = `Current time: ${dayPart || chicagoTime}, ${timePart || ""}
+Hours since last message to Joey: ${lastOutreachHours}
+Last conversation summary: ${summary}
+Top memories:
+- ${mem1}
+- ${mem2}
+- ${mem3}
+
+Should Cal reach out right now?`;
+
+    const completion = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      system: systemPrompt,
+      messages: [{ role: "user", content: userMessage }],
+      max_tokens: 200,
+      temperature: 0.9,
+    });
+
+    const raw = completion?.content?.[0]?.text?.trim() ?? "";
+    let decision;
+    try {
+      decision = JSON.parse(raw);
+    } catch {
+      console.error("[PROACTIVE] Failed to parse Claude response:", raw);
+      return;
+    }
+
+    if (!decision.reach_out || !decision.message) {
+      console.log("[PROACTIVE] Claude decided not to reach out.");
+      return;
+    }
+
+    // 5. Insert bubble message
+    await db.query(
+      `INSERT INTO re_engagement_messages (user_id, mode, content) VALUES ($1, $2, $3)`,
+      [3, "sfw", decision.message]
+    );
+
+    // 6. Send push notification
+    const userResult = await db.query(
+      `SELECT push_token FROM users WHERE id = 3`
+    );
+    const pushToken = userResult.rows[0]?.push_token;
+    if (pushToken) {
+      await fetch("https://exp.host/--/api/v2/push/send", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          to: pushToken,
+          title: "Cal",
+          body: decision.message,
+          data: { screen: "Chat" },
+        }),
+      });
+      console.log(`[PROACTIVE] Sent: "${decision.message}"`);
+    } else {
+      console.warn("[PROACTIVE] No push token for user 3 — message stored but not pushed.");
+    }
+  } catch (err) {
+    console.error("[PROACTIVE] Error in runProactiveCalDecision:", err);
+  }
+}
+
+cron.schedule("0 */3 * * *", async () => {
+  console.log("[PROACTIVE] Running proactive Cal decision check");
+  await runProactiveCalDecision();
+});
 
 // -----------------------------------
 // Re-Engagement Endpoints
