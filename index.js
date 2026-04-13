@@ -3059,12 +3059,6 @@ app.post("/voice/synthesize", requireAuth, async (req, res) => {
   }
 });
 
-// TEMP: manual trigger for proactive Cal decision — remove after testing
-app.get('/admin/test-proactive', async (_req, res) => {
-  await runProactiveCalDecision();
-  res.json({ ok: true });
-});
-
 // -----------------------------------
 // Start Server (Railway expects process.env.PORT)
 // -----------------------------------
