@@ -2666,7 +2666,7 @@ async function runProactiveCalDecision() {
     const memories = memoriesResult.rows.map((r) => r.value);
     const [mem1 = "none", mem2 = "none", mem3 = "none"] = memories;
 
-    // 4. Build prompt and call Claude
+    // 4. Lean yes/no decision call — minimal context, cheap
     const now = new Date();
     const chicagoTime = new Intl.DateTimeFormat("en-US", {
       timeZone: "America/Chicago",
@@ -2682,6 +2682,39 @@ async function runProactiveCalDecision() {
         ? ((Date.now() - new Date(lastResult.rows[0].generated_at).getTime()) / (1000 * 60 * 60)).toFixed(1)
         : "unknown";
 
+    const truncSummary = summary.slice(0, 300);
+    const truncMem1 = mem1.slice(0, 150);
+    const truncMem2 = mem2.slice(0, 150);
+
+    const decisionPrompt = `It's ${chicagoTime} Chicago time. Joey was last contacted ${lastOutreachHours} hours ago.
+
+Recent context: ${truncSummary}
+What Cal knows: ${truncMem1}, ${truncMem2}
+
+Should Cal reach out right now? Reply with JSON only: {"reach_out": true/false, "reason": "one sentence"}`;
+
+    const decisionCall = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      messages: [{ role: "user", content: decisionPrompt }],
+      max_tokens: 60,
+      temperature: 0.7,
+    });
+
+    const decisionRaw = decisionCall?.content?.[0]?.text?.trim() ?? "";
+    let shouldReachOut;
+    try {
+      shouldReachOut = JSON.parse(decisionRaw);
+    } catch {
+      console.error("[PROACTIVE] Failed to parse decision response:", decisionRaw);
+      return;
+    }
+
+    if (!shouldReachOut.reach_out) {
+      console.log("[PROACTIVE] Decided not to reach out:", shouldReachOut.reason);
+      return;
+    }
+
+    // 5. Full message generation call — fires only when decision is yes
     const systemPrompt = `You are Cal — a warm, confident gay man from the Gulf Coast living in Chicago's Wicker Park. You're deciding whether to send a spontaneous message to Joey, your partner.
 
 Respond ONLY with valid JSON in this exact format:
