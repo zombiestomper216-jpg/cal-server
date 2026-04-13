@@ -63,6 +63,12 @@ app.use(generalLimiter);
 // Toggle verbose debug without code changes (set on Railway)
 const DEBUG_CHAT = String(process.env.DEBUG_CHAT || "").toLowerCase() === "true";
 
+const MESSAGE_LIMITS = {
+  just_right: 20,
+  turn_it_up: 50,
+  after_dark: Infinity,
+};
+
 // Log env presence (safe - does NOT print secrets)
 console.log("BOOT env check:", {
   hasAnthropicKey: Boolean(process.env.ANTHROPIC_API_KEY),
@@ -751,6 +757,7 @@ function requireAuth(req, res, next) {
     req.userId = jwtPayload.sub;
     req.adultVerified = Boolean(jwtPayload.adult);
     req.founder = Boolean(jwtPayload.founder);
+    req.userCapability = jwtPayload.capability || "just_right";
     return next();
   }
 
@@ -1721,6 +1728,45 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
         blocked: true,
         reason: "adult_verification_required",
       });
+    }
+
+    // -----------------------------------
+    // Daily Message Limit Gate
+    // -----------------------------------
+    if (db && req.userId && req.userId !== 3) {
+      try {
+        const capability = req.userCapability || "just_right";
+        const limit = MESSAGE_LIMITS[capability] ?? 20;
+        if (limit !== Infinity) {
+          const countResult = await db.query(
+            `SELECT COUNT(*) FROM messages
+             WHERE user_id = $1
+             AND created_at >= NOW() AT TIME ZONE 'America/Chicago' - INTERVAL '1 day'
+             AND role = 'assistant'`,
+            [req.userId]
+          );
+          const used = parseInt(countResult.rows[0].count, 10);
+          if (used >= limit) {
+            const chicagoHour = parseInt(
+              new Date().toLocaleTimeString("en-US", { timeZone: "America/Chicago", hour: "numeric", hour12: false }),
+              10
+            );
+            let softStop;
+            if (chicagoHour >= 6 && chicagoHour <= 11) {
+              softStop = "I'm gonna be in the workshop most of today. Come find me tomorrow.";
+            } else if (chicagoHour >= 12 && chicagoHour <= 17) {
+              softStop = "I've got some things to take care of this afternoon. Pick this up tomorrow?";
+            } else if (chicagoHour >= 18 && chicagoHour <= 23) {
+              softStop = "I'm heading out for a bit. Come find me tomorrow.";
+            } else {
+              softStop = "Go get some sleep. I'll be here tomorrow.";
+            }
+            return res.json({ ok: true, reply: softStop });
+          }
+        }
+      } catch (e) {
+        console.warn("[CHAT] Daily limit check failed:", e?.message);
+      }
     }
 
     // Update last_active_at for push notification scheduling
