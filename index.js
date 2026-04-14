@@ -131,17 +131,16 @@ function buildRealtimeContext(weather) {
   const now = new Date();
   const tz = { timeZone: "America/Chicago" };
 
-  const dayOfWeek = now.toLocaleDateString("en-US", { ...tz, weekday: "long" });
-  const dateStr = now.toLocaleDateString("en-US", { ...tz, month: "long", day: "numeric", year: "numeric" });
-  const hour = parseInt(now.toLocaleTimeString("en-US", { ...tz, hour: "numeric", hour12: false }), 10);
-
-  let timeOfDay;
-  if (hour >= 5 && hour < 12) timeOfDay = "Morning";
-  else if (hour >= 12 && hour < 17) timeOfDay = "Afternoon";
-  else if (hour >= 17 && hour < 21) timeOfDay = "Evening";
-  else timeOfDay = "Late night";
-
-  const hourFormatted = now.toLocaleTimeString("en-US", { ...tz, hour: "numeric", minute: "2-digit", hour12: true });
+  const chicagoTime = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago',
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  }).format(now);
 
   const m = parseInt(now.toLocaleDateString("en-US", { ...tz, month: "numeric" }), 10);
   let season;
@@ -150,7 +149,7 @@ function buildRealtimeContext(weather) {
   else if (m >= 9 && m <= 11) season = "Fall";
   else season = "Winter";
 
-  let ctx = `Current context: ${dayOfWeek}, ${dateStr}. ${timeOfDay} — ${hourFormatted}. ${season}.`;
+  let ctx = `Current date and time: ${chicagoTime}\n\n${season}.`;
 
   if (weather) {
     ctx += ` Chicago weather: ${weather.condition}, ${weather.temp}°F, feels like ${weather.feelsLike}°F.`;
