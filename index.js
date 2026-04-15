@@ -494,6 +494,13 @@ function buildMemoryContext(allMemories, mode, messages = []) {
   // Strict mode scoping: only matching mode or 'all'
   const filtered = allMemories.filter((m) => !m.mode || m.mode === mode || m.mode === "all");
 
+  // Diagnostic: log raw DB fetch counts before any selection
+  console.log(`[MEMORY FETCH] ${allMemories.length} total memories fetched`);
+  const typeCounts = ["routine", "world_detail", "identity", "emotional_moment", "relationship", "preference"]
+    .map(t => `${t}: ${allMemories.filter(m => m.type === t).length}`)
+    .join(", ");
+  console.log(`[MEMORY TYPES] ${typeCounts}`);
+
   // Extract keywords from last 3 user messages for broader context
   const recentUserTexts = (Array.isArray(messages) ? messages : [])
     .filter((m) => m?.role === "user" && typeof m.content === "string")
