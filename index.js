@@ -1901,14 +1901,6 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     const weather = await weatherPromise;
     const realtimeContext = buildRealtimeContext(weather);
 
-    // Diagnostic: log raw client-supplied memories before selection
-    console.log(`[MEMORY FETCH] ${memories.length} total memories fetched`);
-    const typeCounts = ["routine", "world_detail", "identity", "emotional_moment", "relationship", "preference"]
-      .map(t => `${t}: ${memories.filter(m => m.type === t).length}`)
-      .join(", ");
-    console.log(`[MEMORY TYPES] ${typeCounts}`);
-    if (memories.length > 0) console.log(`[MEMORY SHAPE] keys: ${Object.keys(memories[0]).join(", ")}`);
-
     const filteredMemories = buildMemoryContext(memories, mode, messages);
     const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext, founder: isFounder });
 
