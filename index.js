@@ -2763,9 +2763,9 @@ async function runProactiveCalDecision() {
         ? ((Date.now() - new Date(lastResult.rows[0].generated_at).getTime()) / (1000 * 60 * 60)).toFixed(1)
         : "unknown";
 
-    const truncSummary = summary.slice(0, 300);
-    const truncMem1 = mem1.slice(0, 150);
-    const truncMem2 = mem2.slice(0, 150);
+    const truncSummary = summary.slice(0, 500);
+    const truncMem1 = mem1.slice(0, 250);
+    const truncMem2 = mem2.slice(0, 250);
 
     const decisionPrompt = `It's ${chicagoTime} Chicago time. Joey was last contacted ${lastOutreachHours} hours ago.
 
