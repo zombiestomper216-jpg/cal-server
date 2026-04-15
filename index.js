@@ -550,6 +550,13 @@ function buildMemoryContext(allMemories, mode, messages = []) {
 
   // Selective recall: 3-5 memories max
   const selected = sorted.slice(0, 5);
+
+  // Diagnostic logging — remove after investigation
+  console.log(`[MEMORY COUNT] ${selected.length} memories injected`);
+  for (const m of selected) {
+    console.log(`[MEMORY INJECT] ${m.key}: ${m.value}`);
+  }
+
   return selected;
 }
 
