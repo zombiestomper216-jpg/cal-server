@@ -386,9 +386,9 @@ function trackRecurringThemes(deviceId, userText) {
     if (count === 3) {
       themes.push({
         category: "recurring_theme",
-        type: "recurring_theme",
+        type: "routine",
         key: `recurring_theme_${word}`,
-        value: `User frequently brings up the topic of "${word}"`,
+        value: `Joey has brought up the topic of "${word}" multiple times across different conversations, making it a notable recurring theme.`,
         confidence: "high",
       });
     }
@@ -1448,8 +1448,11 @@ const EMOTIONAL_STOPWORDS = [
  */
 function typeFromCategory(category) {
   if (category === "emotional_moment") return "emotional_moment";
-  if (category === "recurring_theme") return "recurring_theme";
-  return "preference";
+  if (category === "recurring_theme") return "routine";
+  if (category === "identity") return "identity";
+  if (category === "boundaries") return "identity";
+  if (category === "activities") return "routine";
+  return "preference"; // preferences, dislikes
 }
 
 /**
@@ -1556,11 +1559,15 @@ if (
 
         // Generate a key based on category and content
         const key = `${category}_${value.toLowerCase().replace(/\s+/g, "_").substring(0, 30)}`;
+        const formattedValue = formatMemoryValue(category, value);
+
+        // Quality gate: skip entries that don't carry enough real information
+        if (formattedValue.trim().split(/\s+/).length < 15) continue;
 
         detected.push({
           category,
           key,
-          value: formatMemoryValue(category, value),
+          value: formattedValue,
           type: typeFromCategory(category),
           confidence: "low", // User-confirmed memories upgrade to 'high'
           matchedPattern: pattern.source,
@@ -1578,17 +1585,17 @@ if (
 function formatMemoryValue(category, rawValue) {
   switch (category) {
     case "preferences":
-      return `User likes ${rawValue}`;
+      return `Joey genuinely enjoys ${rawValue}.`;
     case "dislikes":
-      return `User dislikes ${rawValue}`;
+      return `Joey has expressed that he dislikes ${rawValue} and does not want it brought up.`;
     case "identity":
-      return `User is ${rawValue}`;
+      return `Joey has identified himself as ${rawValue}.`;
     case "activities":
-      return `User is ${rawValue}`;
+      return `Joey mentioned he is currently ${rawValue}.`;
     case "boundaries":
-      return `User has a boundary: do not ${rawValue}`;
+      return `Joey has set an explicit boundary: ${rawValue} should not be referenced or mentioned.`;
     case "emotional_moment":
-      return `User has been ${rawValue}`;
+      return `Joey shared that he has been ${rawValue}, which came up in their conversation.`;
     default:
       return rawValue;
   }
