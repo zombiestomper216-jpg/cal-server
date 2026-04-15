@@ -494,13 +494,6 @@ function buildMemoryContext(allMemories, mode, messages = []) {
   // Strict mode scoping: only matching mode or 'all'
   const filtered = allMemories.filter((m) => !m.mode || m.mode === mode || m.mode === "all");
 
-  // Diagnostic: log raw DB fetch counts before any selection
-  console.log(`[MEMORY FETCH] ${allMemories.length} total memories fetched`);
-  const typeCounts = ["routine", "world_detail", "identity", "emotional_moment", "relationship", "preference"]
-    .map(t => `${t}: ${allMemories.filter(m => m.type === t).length}`)
-    .join(", ");
-  console.log(`[MEMORY TYPES] ${typeCounts}`);
-
   // Extract keywords from last 3 user messages for broader context
   const recentUserTexts = (Array.isArray(messages) ? messages : [])
     .filter((m) => m?.role === "user" && typeof m.content === "string")
@@ -1907,6 +1900,14 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 
     const weather = await weatherPromise;
     const realtimeContext = buildRealtimeContext(weather);
+
+    // Diagnostic: log raw client-supplied memories before selection
+    console.log(`[MEMORY FETCH] ${memories.length} total memories fetched`);
+    const typeCounts = ["routine", "world_detail", "identity", "emotional_moment", "relationship", "preference"]
+      .map(t => `${t}: ${memories.filter(m => m.type === t).length}`)
+      .join(", ");
+    console.log(`[MEMORY TYPES] ${typeCounts}`);
+    if (memories.length > 0) console.log(`[MEMORY SHAPE] keys: ${Object.keys(memories[0]).join(", ")}`);
 
     const filteredMemories = buildMemoryContext(memories, mode, messages);
     const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext, founder: isFounder });
