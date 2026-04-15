@@ -548,8 +548,40 @@ function buildMemoryContext(allMemories, mode, messages = []) {
     return new Date(b.updated_at) - new Date(a.updated_at);
   });
 
-  // Selective recall: 3-5 memories max
-  const selected = sorted.slice(0, 5);
+  // Selective recall: 10 memories max (3 routine + 2 world_detail + 5 flex)
+  const TOTAL_SLOTS = 10;
+  const ROUTINE_SLOTS = 3;
+  const WORLD_DETAIL_SLOTS = 2;
+  const FLEX_SLOTS = TOTAL_SLOTS - ROUTINE_SLOTS - WORLD_DETAIL_SLOTS; // 5
+
+  const routinePool     = sorted.filter(m => m.type === "routine");
+  const worldDetailPool = sorted.filter(m => m.type === "world_detail");
+
+  const routinePick     = routinePool.slice(0, ROUTINE_SLOTS);
+  const worldDetailPick = worldDetailPool.slice(0, WORLD_DETAIL_SLOTS);
+
+  // Overflow: unfilled reserved slots go back into flex pool
+  const unusedRoutineSlots     = ROUTINE_SLOTS - routinePick.length;
+  const unusedWorldDetailSlots = WORLD_DETAIL_SLOTS - worldDetailPick.length;
+  const extraFlexSlots         = unusedRoutineSlots + unusedWorldDetailSlots;
+
+  // Build flex candidates from overflow of reserved pools + everything else, re-sorted by score
+  const overflowCandidates = [
+    ...routinePool.slice(ROUTINE_SLOTS),
+    ...worldDetailPool.slice(WORLD_DETAIL_SLOTS),
+    ...sorted.filter(m => m.type !== "routine" && m.type !== "world_detail"),
+  ].sort((a, b) => {
+    const relA = relevance(a);
+    const relB = relevance(b);
+    if (relA !== relB) return relB - relA;
+    if (a.confidence === "high" && b.confidence !== "high") return -1;
+    if (b.confidence === "high" && a.confidence !== "high") return 1;
+    return new Date(b.updated_at) - new Date(a.updated_at);
+  });
+
+  const flexPick = overflowCandidates.slice(0, FLEX_SLOTS + extraFlexSlots);
+
+  const selected = [...routinePick, ...worldDetailPick, ...flexPick];
 
   // Diagnostic logging — remove after investigation
   console.log(`[MEMORY COUNT] ${selected.length} memories injected`);
