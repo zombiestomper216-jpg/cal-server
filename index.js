@@ -575,6 +575,41 @@ function softenEarlySnap(reply, messages) {
   return reply;
 }
 
+// Split a plain-text reply into segments ≤350 chars at sentence boundaries.
+// Returns a single-element array if markdown indicators are detected or the
+// text is already short enough.
+function splitIntoMessages(text) {
+  // If any markdown indicators are present, send as a single message
+  if (/[#`]|\*\*|^[-*] |\d+\. /m.test(text)) {
+    return [text];
+  }
+
+  // Short enough — no split needed
+  if (text.length <= 350) {
+    return [text];
+  }
+
+  // Split on sentence-ending punctuation followed by whitespace.
+  // Lookbehind keeps the punctuation with the preceding sentence.
+  const parts = text.split(/(?<=[.!?])\s+/);
+
+  const segments = [];
+  let current = "";
+
+  for (const part of parts) {
+    const candidate = current ? current + " " + part : part;
+    if (candidate.length <= 350) {
+      current = candidate;
+    } else {
+      if (current) segments.push(current);
+      current = part;
+    }
+  }
+  if (current) segments.push(current);
+
+  return segments.length > 0 ? segments : [text];
+}
+
 function violatesHardTaboo(userTextRaw) {
   const t = String(userTextRaw || "").toLowerCase();
 
@@ -1913,6 +1948,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 
     const rawReply = calResponse.reply ?? "(no reply)";
     const reply = softenEarlySnap(rawReply, messages).replace(/—/g, ",");
+    const messages_out = splitIntoMessages(reply);
 
     // Best-effort DB write (never blocks chat)
     if (db) {
@@ -2016,7 +2052,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       saveMsg("assistant", reply);
     }
 
-    return res.json({ ok: true, reply, easterEgg: null });
+    return res.json({ ok: true, reply, messages: messages_out, easterEgg: null });
   } catch (err) {
     console.error("CHAT ERROR:", err);
     return res.status(500).json({ ok: false, error: "Chat failed" });
