@@ -18,6 +18,7 @@ import {
   AFTER_DARK_BEHAVIOR_PATCH,
   IDENTITY_DEFLECTION_BLOCK,
   META_AWARE_BLOCK,
+  NIKKI_AWARE_BLOCK,
 } from "./prompts.js";
 import { sendMessageToCal, checkEasterEgg } from "./cal.js";
 import { generateCalMessage } from "./generateCalMessage.js";
@@ -1930,8 +1931,10 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     let fullSystemPrompt = systemPrompt;
 
     // Identity / meta-awareness block
-    if (isMetaAware) {
+    if (isMetaAware && req.userId === 3) {
       fullSystemPrompt += '\n\n' + META_AWARE_BLOCK;
+    } else if (isMetaAware) {
+      fullSystemPrompt += '\n\n' + NIKKI_AWARE_BLOCK;
     } else {
       fullSystemPrompt += '\n\n' + IDENTITY_DEFLECTION_BLOCK;
     }
