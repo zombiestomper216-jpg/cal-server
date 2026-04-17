@@ -10,6 +10,7 @@ import crypto from "crypto";
 import helmet from "helmet";
 import rateLimit from "express-rate-limit";
 import { Resend } from "resend";
+import nodemailer from "nodemailer";
 import cron from "node-cron";
 
 import {
@@ -281,6 +282,16 @@ const resend = process.env.RESEND_API_KEY
   : null;
 
 const EMAIL_FROM = process.env.EMAIL_FROM || "Cal <onboarding@resend.dev>";
+
+const gmailTransporter = (process.env.GMAIL_USER && process.env.GMAIL_APP_PASSWORD)
+  ? nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: process.env.GMAIL_USER,
+        pass: process.env.GMAIL_APP_PASSWORD,
+      },
+    })
+  : null;
 const APP_URL = process.env.APP_URL || "https://bromo-nsfw-production.up.railway.app";
 
 // -----------------------------------
@@ -3219,6 +3230,115 @@ app.post("/voice/synthesize", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("[voice] Unexpected error:", err);
     res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// -----------------------------------
+// Patreon Webhook
+// -----------------------------------
+const PATREON_TIER_MAP = {
+  "Slow Burn":  { tier: "slow_burn",  founder: false },
+  "Turn It Up": { tier: "turn_it_up", founder: false },
+  "After Dark": { tier: "after_dark", founder: true  },
+};
+
+app.post("/webhooks/patreon", express.raw({ type: "application/json" }), async (req, res) => {
+  try {
+    const secret = process.env.PATREON_WEBHOOK_SECRET;
+    const signature = req.headers["x-patreon-signature"];
+
+    if (!secret || !signature) {
+      return res.status(401).json({ ok: false, error: "Missing signature." });
+    }
+
+    const expected = crypto.createHmac("md5", secret).update(req.body).digest("hex");
+    if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
+      return res.status(401).json({ ok: false, error: "Invalid signature." });
+    }
+
+    const payload = JSON.parse(req.body.toString("utf8"));
+
+    const eventType = req.headers["x-patreon-event"];
+    if (eventType !== "members:pledge:create") {
+      return res.status(200).json({ ok: true, ignored: true });
+    }
+
+    const member = payload?.data?.attributes;
+    if (!member || member.patron_status !== "active_patron") {
+      return res.status(200).json({ ok: true, ignored: true });
+    }
+
+    const email = member.email;
+    if (!email) {
+      console.warn("[PATREON-WEBHOOK] No email in payload");
+      return res.status(400).json({ ok: false, error: "No email in payload." });
+    }
+
+    // Tier name comes from the first included reward/tier object
+    const tierName = payload?.included?.find(
+      (r) => r.type === "tier" || r.type === "reward"
+    )?.attributes?.title || "";
+
+    const tierConfig = PATREON_TIER_MAP[tierName];
+    if (!tierConfig) {
+      console.warn("[PATREON-WEBHOOK] Unknown tier:", tierName);
+      return res.status(200).json({ ok: true, ignored: true, reason: "unknown tier" });
+    }
+
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Database not available." });
+    }
+
+    let founder = false;
+    if (tierConfig.founder) {
+      const countResult = await db.query(
+        "SELECT COUNT(*) AS cnt FROM invite_codes WHERE founder = true AND tier = 'after_dark'"
+      );
+      const founderCount = parseInt(countResult.rows[0].cnt, 10);
+      founder = founderCount < 20;
+    }
+
+    const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    const bytes = crypto.randomBytes(8);
+    const code = Array.from(bytes).map((b) => chars[b % chars.length]).join("");
+
+    await db.query(
+      "INSERT INTO invite_codes (code, tier, founder) VALUES ($1, $2, $3)",
+      [code, tierConfig.tier, founder]
+    );
+
+    const tierDisplayName = tierName;
+    const emailText = [
+      `Your Cal invite code: ${code}`,
+      "",
+      "Go to calafterdark.com, create your account, and enter this code when prompted.",
+      "",
+      `This code is yours. It's single-use and tied to your ${tierDisplayName} subscription.`,
+      "",
+      "Welcome.",
+      "— Cal",
+    ].join("\n");
+
+    if (gmailTransporter) {
+      try {
+        await gmailTransporter.sendMail({
+          from: process.env.GMAIL_USER,
+          to: email,
+          subject: "You're in. Here's your Cal access code.",
+          text: emailText,
+        });
+        console.log("[PATREON-WEBHOOK] Invite sent to:", email, "code:", code, "tier:", tierConfig.tier);
+      } catch (emailErr) {
+        console.error("[PATREON-WEBHOOK] Email send failed:", emailErr?.message || emailErr);
+      }
+    } else {
+      console.warn("[PATREON-WEBHOOK] No Gmail transporter configured. Code:", code, "for:", email);
+    }
+
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("[PATREON-WEBHOOK] ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Webhook processing failed." });
   }
 });
 
