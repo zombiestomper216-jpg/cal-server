@@ -3251,12 +3251,13 @@ app.post("/webhooks/patreon", express.raw({ type: "application/json" }), async (
       return res.status(401).json({ ok: false, error: "Missing signature." });
     }
 
-    const expected = crypto.createHmac("md5", secret).update(req.body).digest("hex");
+    const rawBody = Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body));
+    const expected = crypto.createHmac("md5", secret).update(rawBody).digest("hex");
     if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) {
       return res.status(401).json({ ok: false, error: "Invalid signature." });
     }
 
-    const payload = JSON.parse(req.body.toString("utf8"));
+    const payload = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString("utf8")) : req.body;
 
     const eventType = req.headers["x-patreon-event"];
     if (eventType !== "members:pledge:create") {
