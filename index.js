@@ -560,11 +560,11 @@ function buildMemoryContext(allMemories, mode, messages = []) {
     return new Date(b.updated_at) - new Date(a.updated_at);
   });
 
-  // Selective recall: 10 memories max (3 routine + 2 world_detail + 5 flex)
-  const TOTAL_SLOTS = 10;
-  const ROUTINE_SLOTS = 3;
-  const WORLD_DETAIL_SLOTS = 2;
-  const FLEX_SLOTS = TOTAL_SLOTS - ROUTINE_SLOTS - WORLD_DETAIL_SLOTS; // 5
+  // Selective recall: 20 memories max (4 routine + 4 world_detail + 12 flex)
+  const TOTAL_SLOTS = 20;
+  const ROUTINE_SLOTS = 4;
+  const WORLD_DETAIL_SLOTS = 4;
+  const FLEX_SLOTS = TOTAL_SLOTS - ROUTINE_SLOTS - WORLD_DETAIL_SLOTS; // 12
 
   const routinePool     = sorted.filter(m => m.type === "routine");
   const worldDetailPool = sorted.filter(m => m.type === "world_detail");
