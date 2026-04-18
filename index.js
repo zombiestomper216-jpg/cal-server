@@ -2824,6 +2824,15 @@ async function runProactiveCalDecision() {
     const memories = memoriesResult.rows.map((r) => r.value);
     const [mem1 = "none", mem2 = "none", mem3 = "none"] = memories;
 
+    // 3b. Today's outreach count (Chicago calendar day)
+    const todayCountResult = await db.query(
+      `SELECT COUNT(*) AS cnt FROM re_engagement_messages
+       WHERE user_id = 3
+         AND (generated_at AT TIME ZONE 'America/Chicago')::date
+           = (NOW() AT TIME ZONE 'America/Chicago')::date`
+    );
+    const todayCount = parseInt(todayCountResult.rows[0]?.cnt ?? "0", 10);
+
     // 4. Lean yes/no decision call — minimal context, cheap
     const now = new Date();
     const chicagoTime = new Intl.DateTimeFormat("en-US", {
@@ -2835,6 +2844,14 @@ async function runProactiveCalDecision() {
     }).format(now);
     const [dayPart, timePart] = chicagoTime.split(" at ") ?? [chicagoTime, ""];
 
+    const isWeekend = ["Saturday", "Sunday"].includes(dayPart);
+    const dayType = isWeekend ? "weekend" : "weekday";
+    const timeOfDay =
+      chicagoHour >= 7 && chicagoHour < 12  ? "morning" :
+      chicagoHour >= 12 && chicagoHour < 17 ? "afternoon" :
+      chicagoHour >= 17 && chicagoHour < 21 ? "evening" :
+      "late night";
+
     const lastOutreachHours =
       lastResult.rows.length > 0
         ? ((Date.now() - new Date(lastResult.rows[0].generated_at).getTime()) / (1000 * 60 * 60)).toFixed(1)
@@ -2844,16 +2861,32 @@ async function runProactiveCalDecision() {
     const truncMem1 = mem1.slice(0, 250);
     const truncMem2 = mem2.slice(0, 250);
 
-    const decisionPrompt = `It's ${chicagoTime} Chicago time. Joey was last contacted ${lastOutreachHours} hours ago.
+    const decisionSystemPrompt = `You are deciding whether Cal should send Joey a spontaneous message right now.
 
-Recent context: ${truncSummary}
-What Cal knows: ${truncMem1}, ${truncMem2}
+Cal is a warm, confident gay man from the Gulf Coast living in Chicago's Wicker Park. Joey is his partner.
 
-Should Cal reach out right now? Reply with JSON only: {"reach_out": true/false, "reason": "one sentence"}`;
+Factor in:
+- Time of day: morning (7–11am) = casual check-in energy is fine; afternoon (noon–4pm) = quieter, only if something genuinely warrants it; evening (5–8pm) = warmer, more likely; late night (9pm+) = only if something truly calls for it
+- Today's outreach count: if Cal has already reached out 2 or more times today, lean strongly toward no
+- Day of week: weekends Cal is more likely to reach out; weekdays he respects that Joey works
+
+Reply with JSON only: {"reach_out": true/false, "reason": "one sentence"}`;
+
+    const decisionUserMessage = `Current time: ${chicagoTime} (Chicago)
+Time of day: ${timeOfDay}
+Day type: ${dayType}
+Times Cal has reached out today: ${todayCount}
+Hours since last outreach: ${lastOutreachHours}h
+
+Last conversation summary: ${truncSummary}
+What Cal knows about Joey:
+- ${truncMem1}
+- ${truncMem2}`;
 
     const decisionCall = await anthropic.messages.create({
       model: "claude-sonnet-4-20250514",
-      messages: [{ role: "user", content: decisionPrompt }],
+      system: decisionSystemPrompt,
+      messages: [{ role: "user", content: decisionUserMessage }],
       max_tokens: 60,
       temperature: 0.7,
     });
