@@ -268,6 +268,14 @@ async function runMigrations() {
 }
 runMigrations();
 
+if (db) {
+  db.query(
+    `DELETE FROM memories WHERE user_id = 3 AND key IN (
+      'recurring_theme_your','recurring_theme_amor','recurring_theme_baby'
+    )`
+  ).catch(e => console.warn('[MIGRATION] Junk theme cleanup failed:', e?.message));
+}
+
 // -----------------------------------
 // JWT & Email Config
 // -----------------------------------
@@ -363,7 +371,7 @@ function paceFromReq(reqBody) {
 // -----------------------------------
 // Recurring Theme Tracker (in-memory, resets on restart)
 // -----------------------------------
-const recentTopics = new Map(); // device_id → Map<keyword, count>
+const recentTopics = new Map(); // device_id → Map<keyword, Set<convId>>
 const COMMON_WORDS = new Set([
   "that", "this", "with", "have", "from", "they", "been", "some", "what",
   "when", "would", "about", "their", "them", "were", "said", "each", "just",
@@ -377,10 +385,18 @@ const COMMON_WORDS = new Set([
   "wanna", "gotta", "don't", "doesn't", "didn't", "wasn't", "weren't",
   "isn't", "aren't", "can't", "won't", "hasn't", "haven't", "couldn't",
 ]);
+const STOP_WORDS = new Set([
+  'your', 'mine', 'baby', 'amor', 'love', 'that', 'this', 'here',
+  'with', 'what', 'just', 'like', 'when', 'then', 'they', 'them',
+  'have', 'from', 'will', 'been', 'some', 'more', 'also', 'very',
+  'good', 'okay', 'yeah', 'sure', 'know', 'think', 'want', 'need',
+]);
 
-function trackRecurringThemes(deviceId, userText) {
+function trackRecurringThemes(deviceId, userText, convId) {
   const words = userText.toLowerCase().match(/\b[a-z]{4,}\b/g) || [];
-  const meaningful = [...new Set(words.filter((w) => !COMMON_WORDS.has(w)))];
+  const meaningful = [...new Set(
+    words.filter((w) => !COMMON_WORDS.has(w) && !STOP_WORDS.has(w))
+  )];
 
   if (!recentTopics.has(deviceId)) recentTopics.set(deviceId, new Map());
   const topicMap = recentTopics.get(deviceId);
@@ -393,9 +409,10 @@ function trackRecurringThemes(deviceId, userText) {
 
   const themes = [];
   for (const word of meaningful) {
-    const count = (topicMap.get(word) || 0) + 1;
-    topicMap.set(word, count);
-    if (count === 3) {
+    if (!topicMap.has(word)) topicMap.set(word, new Set());
+    const convSet = topicMap.get(word);
+    convSet.add(convId);
+    if (convSet.size === 3) {
       themes.push({
         category: "recurring_theme",
         type: "routine",
@@ -2054,7 +2071,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       (async () => {
         try {
           const detected = detectMemoriesHeuristic(userText);
-          const recurring = chatDeviceId ? trackRecurringThemes(chatDeviceId, userText) : [];
+          const recurring = chatDeviceId ? trackRecurringThemes(chatDeviceId, userText, threadId ?? crypto.randomUUID()) : [];
           const allDetected = [...detected, ...recurring];
 
           for (const mem of allDetected) {
