@@ -2269,7 +2269,7 @@ app.get("/memories", requireAuth, async (req, res) => {
       query += ` AND (mode = $${params.length} OR mode = 'all')`;
     }
 
-    query += " ORDER BY created_at DESC";
+    query += " ORDER BY updated_at DESC LIMIT 100";
 
     const result = await db.query(query, params);
 
