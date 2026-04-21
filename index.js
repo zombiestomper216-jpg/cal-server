@@ -511,9 +511,17 @@ async function generateVoyageEmbedding(text) {
       'Authorization': `Bearer ${process.env.VOYAGE_API_KEY}`,
       'Content-Type': 'application/json'
     },
-    body: JSON.stringify({ model: 'voyage-3-lite', input: text })
+    body: JSON.stringify({
+      model: 'voyage-3-lite',
+      input: text
+    })
   });
   const data = await response.json();
+  console.log('Voyage response status:', response.status);
+  console.log('Voyage response data:', JSON.stringify(data).slice(0, 200));
+  if (!data.data || !data.data[0]) {
+    throw new Error(`Voyage API error: ${JSON.stringify(data)}`);
+  }
   return data.data[0].embedding;
 }
 
