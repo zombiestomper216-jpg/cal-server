@@ -2429,7 +2429,7 @@ app.post('/admin/backfill-embeddings', async (req, res) => {
     for (const row of rows) {
       try {
         await saveMemoryEmbedding(row.user_id, row.key, row.value);
-        await new Promise(resolve => setTimeout(resolve, 100));
+        await new Promise(resolve => setTimeout(resolve, 500));
         success++;
       } catch (err) {
         console.error(`Failed embedding for key ${row.key}:`, err.message);
