@@ -201,6 +201,9 @@ const db =
     ? new Pool({
         connectionString: DATABASE_URL,
         ...(wantsSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+        max: 5,
+        idleTimeoutMillis: 10000,
+        connectionTimeoutMillis: 5000,
       })
     : null;
 
