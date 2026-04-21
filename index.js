@@ -31,7 +31,10 @@ const { Pool } = pg;
 
 const supabaseDb = new Pool({
   connectionString: process.env.SUPABASE_DATABASE_URL,
-  ssl: { rejectUnauthorized: false }
+  ssl: { rejectUnauthorized: false },
+  max: 3,
+  idleTimeoutMillis: 10000,
+  connectionTimeoutMillis: 5000
 });
 
 const app = express();
