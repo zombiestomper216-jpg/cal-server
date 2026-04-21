@@ -29,6 +29,11 @@ dotenv.config();
 
 const { Pool } = pg;
 
+const supabaseDb = new Pool({
+  connectionString: process.env.SUPABASE_DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
 const app = express();
 app.set('trust proxy', 1);
 app.use(cors());
@@ -497,6 +502,66 @@ basePrompt = CAL_SFW_SYSTEM_PROMPT;  }
   }
 
   return basePrompt;
+}
+
+async function generateVoyageEmbedding(text) {
+  const response = await fetch('https://api.voyageai.com/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${process.env.VOYAGE_API_KEY}`,
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({ model: 'voyage-3-lite', input: text })
+  });
+  const data = await response.json();
+  return data.data[0].embedding;
+}
+
+async function saveMemoryEmbedding(userId, memoryKey, memoryValue) {
+  try {
+    const embedding = await generateVoyageEmbedding(memoryValue);
+    await supabaseDb.query(`
+      INSERT INTO memory_embeddings (user_id, memory_key, embedding, updated_at)
+      VALUES ($1, $2, $3::vector, NOW())
+      ON CONFLICT (user_id, memory_key)
+      DO UPDATE SET embedding = EXCLUDED.embedding, updated_at = NOW()
+    `, [userId, memoryKey, JSON.stringify(embedding)]);
+  } catch (err) {
+    console.error('Error saving memory embedding:', err);
+  }
+}
+
+async function getSemanticMemories(userId, queryText, allMemories, limit = 10) {
+  try {
+    const queryEmbedding = await generateVoyageEmbedding(queryText);
+    const result = await supabaseDb.query(`
+      SELECT memory_key,
+        1 - (embedding <=> $1::vector) AS similarity
+      FROM memory_embeddings
+      WHERE user_id = $2
+      ORDER BY embedding <=> $1::vector
+      LIMIT $3
+    `, [JSON.stringify(queryEmbedding), userId, limit]);
+
+    if (!result.rows.length) return allMemories;
+
+    const topKeys = new Set(result.rows.map(r => r.memory_key));
+    const alwaysOn = allMemories.filter(m =>
+      m.type === 'identity' || m.type === 'routine'
+    ).slice(0, 4);
+    const semantic = allMemories.filter(m => topKeys.has(m.key)).slice(0, 7);
+
+    const seen = new Set();
+    const combined = [...alwaysOn, ...semantic].filter(m => {
+      if (seen.has(m.key)) return false;
+      seen.add(m.key);
+      return true;
+    });
+    return combined.slice(0, 10);
+  } catch (err) {
+    console.error('Semantic memory error, falling back to standard:', err);
+    return allMemories;
+  }
 }
 
 // Relevance decay penalty based on last_referenced_at / updated_at age
@@ -1930,7 +1995,19 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     const weather = await weatherPromise;
     const realtimeContext = buildRealtimeContext(weather);
 
-    const filteredMemories = buildMemoryContext(memories, mode, messages);
+    let filteredMemories = buildMemoryContext(memories, mode, messages);
+
+    // Upgrade to semantic retrieval if we have a query to work with
+    const lastUserMessage = messages.filter(m => m.role === 'user').slice(-1)[0];
+    if (lastUserMessage && req.userId) {
+      filteredMemories = await getSemanticMemories(
+        req.userId,
+        lastUserMessage.content,
+        memories,
+        10
+      );
+    }
+
     const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext, founder: isFounder });
 
 
@@ -2309,6 +2386,11 @@ app.post("/memories", requireAuth, async (req, res) => {
        RETURNING *`,
       [device_id, key, value, normalizeMemoryMode(req.body.mode), type, userId]
     );
+
+    // Generate and store embedding in Supabase (fire-and-forget)
+    if (req.userId && result.rows[0]) {
+      saveMemoryEmbedding(req.userId, key, value);
+    }
 
     return res.json({
       ok: true,
