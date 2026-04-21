@@ -2402,6 +2402,37 @@ app.post("/memories", requireAuth, async (req, res) => {
   }
 });
 
+// POST /admin/backfill-embeddings - One-time backfill of Voyage embeddings for all high-confidence memories
+app.post('/admin/backfill-embeddings', async (req, res) => {
+  if (req.headers['x-admin-key'] !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ error: 'Unauthorized' });
+  }
+
+  try {
+    const { rows } = await db.query(
+      `SELECT user_id, key, value FROM memories WHERE confidence = 'high'`
+    );
+
+    let success = 0;
+    let failed = 0;
+
+    for (const row of rows) {
+      try {
+        await saveMemoryEmbedding(row.user_id, row.key, row.value);
+        await new Promise(resolve => setTimeout(resolve, 100));
+        success++;
+      } catch (err) {
+        console.error(`Failed embedding for key ${row.key}:`, err);
+        failed++;
+      }
+    }
+
+    res.json({ ok: true, success, failed, total: rows.length });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /memories/transfer - Transfer memories (orphan-claim OR device-to-device)
 app.post("/memories/transfer", requireAuth, async (req, res) => {
   try {
