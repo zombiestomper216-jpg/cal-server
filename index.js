@@ -527,7 +527,8 @@ async function saveMemoryEmbedding(userId, memoryKey, memoryValue) {
       DO UPDATE SET embedding = EXCLUDED.embedding, updated_at = NOW()
     `, [userId, memoryKey, JSON.stringify(embedding)]);
   } catch (err) {
-    console.error('Error saving memory embedding:', err);
+    console.error('Error saving memory embedding:', err.message, err.stack);
+    throw err;
   }
 }
 
@@ -2415,6 +2416,7 @@ app.post('/admin/backfill-embeddings', async (req, res) => {
 
     let success = 0;
     let failed = 0;
+    let firstError = null;
 
     for (const row of rows) {
       try {
@@ -2422,12 +2424,13 @@ app.post('/admin/backfill-embeddings', async (req, res) => {
         await new Promise(resolve => setTimeout(resolve, 100));
         success++;
       } catch (err) {
-        console.error(`Failed embedding for key ${row.key}:`, err);
+        console.error(`Failed embedding for key ${row.key}:`, err.message);
         failed++;
+        if (failed === 1) firstError = err.message;
       }
     }
 
-    res.json({ ok: true, success, failed, total: rows.length });
+    res.json({ ok: true, success, failed, total: rows.length, firstError });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
