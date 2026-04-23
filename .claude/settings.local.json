@@ -10,7 +10,8 @@
       "Bash(find /c/Users/Joey/cal-app -type f \\\\\\(-name *.xml -o -name *.plist \\\\\\))",
       "Read(//c/Users/Joey/cal-app/hooks//**)",
       "Read(//c/Users/Joey/cal-app/components//**)",
-      "Bash(wc -l /c/Users/Joey/cal-app/app/'\\(tabs\\)'/chat.tsx)"
+      "Bash(wc -l /c/Users/Joey/cal-app/app/'\\(tabs\\)'/chat.tsx)",
+      "Bash(node -e ' *)"
     ]
   }
 }
