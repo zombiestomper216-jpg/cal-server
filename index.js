@@ -172,12 +172,12 @@ const anthropic = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
-const SESSION_SUMMARY_PROMPT = `You are summarizing a conversation between a user and Cal, an AI companion.
-Write a 2–4 sentence narrative summary in third person, past tense.
-Capture the emotional tone of the conversation, anything personal the user shared, and where things left off.
-Write it the way someone would naturally remember a conversation — warm, human, no clinical language, no bullet points.
-Return only the summary text. Nothing else.
-Do not begin the summary with an action beat or asterisk-formatted text. Begin with a narrative sentence about the user or the conversation.`;
+const SESSION_SUMMARY_PROMPT = `You are summarizing a conversation between Joey and Cal, an AI companion.
+Write a 2–4 sentence factual summary in third person, past tense.
+Focus only on: what Joey shared about himself, events or activities that occurred, plans or intentions Joey mentioned, and where the conversation ended topically.
+Do not include: anything Cal said or did, Cal's tone or voice or manner or physical actions, action beats of any kind (asterisked or narrated), quotations from either party, descriptions of atmosphere or emotional tone of the exchange, or any characterization of Cal's mood or delivery.
+Report facts and events from Joey's perspective only. Neutral reportage.
+Return only the summary text. Nothing else.`;
 
 const THREAD_TITLE_PROMPT = `You are generating a short title for a conversation.
 Based on the messages provided, write a 3-5 word title that captures the main topic or feeling of the conversation.
