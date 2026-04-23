@@ -397,14 +397,19 @@ const COMMON_WORDS = new Set([
   "isn't", "aren't", "can't", "won't", "hasn't", "haven't", "couldn't",
 ]);
 const STOP_WORDS = new Set([
-  'your', 'mine', 'baby', 'amor', 'love', 'that', 'this', 'here',
-  'with', 'what', 'just', 'like', 'when', 'then', 'they', 'them',
-  'have', 'from', 'will', 'been', 'some', 'more', 'also', 'very',
-  'good', 'okay', 'yeah', 'sure', 'know', 'think', 'want', 'need',
+  'your', 'mine', 'baby', 'amor', 'love', 'that', 'this',
+  'here', 'with', 'what', 'just', 'like', 'when', 'then',
+  'they', 'them', 'have', 'from', 'will', 'been', 'some',
+  'more', 'also', 'very', 'good', 'okay', 'yeah', 'sure',
+  'know', 'think', 'want', 'need', 'beer', 'ever', 'never',
+  'swig', 'takes', 'project', 'friends', 'sometimes',
+  'really', 'maybe', 'about', 'would', 'could', 'should',
+  'anything', 'something', 'everything', 'nothing', 'cals',
+  'cal', 'joey',
 ]);
 
 function trackRecurringThemes(deviceId, userText, convId) {
-  const words = userText.toLowerCase().match(/\b[a-z]{4,}\b/g) || [];
+  const words = userText.toLowerCase().match(/\b[a-z]{5,}\b/g) || [];
   const meaningful = [...new Set(
     words.filter((w) => !COMMON_WORDS.has(w) && !STOP_WORDS.has(w))
   )];
@@ -424,13 +429,16 @@ function trackRecurringThemes(deviceId, userText, convId) {
     const convSet = topicMap.get(word);
     convSet.add(convId);
     if (convSet.size === 3) {
-      themes.push({
-        category: "recurring_theme",
-        type: "routine",
-        key: `recurring_theme_${word}`,
-        value: `Joey has brought up the topic of "${word}" multiple times across different conversations, making it a notable recurring theme.`,
-        confidence: "high",
-      });
+      const val = `Joey has brought up the topic of "${word}" multiple times across different conversations, making it a notable recurring theme.`;
+      if (val.length >= 50) {
+        themes.push({
+          category: "recurring_theme",
+          type: "routine",
+          key: `recurring_theme_${word}`,
+          value: val,
+          confidence: "high",
+        });
+      }
     }
   }
   return themes;
@@ -2164,10 +2172,9 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
         try {
           const detected = detectMemoriesHeuristic(userText);
           const recurring = chatDeviceId ? trackRecurringThemes(chatDeviceId, userText, threadId ?? crypto.randomUUID()) : [];
-          const allDetected = [...detected, ...recurring];
+          const effectiveDeviceId = chatDeviceId || `user_${chatUserId}`;
 
-          for (const mem of allDetected) {
-            const effectiveDeviceId = chatDeviceId || `user_${chatUserId}`;
+          for (const mem of detected) {
             await db.query(
               `INSERT INTO memories (device_id, key, value, mode, confidence, type, user_id)
                VALUES ($1, $2, $3, $4, 'high', $5, $6)
@@ -2177,8 +2184,18 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
               [effectiveDeviceId, mem.key, mem.value, mode, mem.type || typeFromCategory(mem.category), chatUserId]
             );
           }
-          if (DEBUG_CHAT && allDetected.length > 0) {
-            console.log(`[AUTO-DETECT] Saved ${allDetected.length} memories for ${chatDeviceId || chatUserId}`);
+
+          for (const mem of recurring) {
+            await db.query(
+              `INSERT INTO memories (device_id, key, value, mode, confidence, type, user_id)
+               VALUES ($1, $2, $3, $4, 'high', $5, $6)
+               ON CONFLICT (device_id, key) DO NOTHING`,
+              [effectiveDeviceId, mem.key, mem.value, mode, mem.type || typeFromCategory(mem.category), chatUserId]
+            );
+          }
+
+          if (DEBUG_CHAT && (detected.length + recurring.length) > 0) {
+            console.log(`[AUTO-DETECT] Saved ${detected.length + recurring.length} memories for ${chatDeviceId || chatUserId}`);
           }
         } catch (e) {
           console.warn("[AUTO-DETECT] Failed:", e?.message || e);
