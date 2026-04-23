@@ -17,6 +17,8 @@ export async function sendMessageToCal({
   systemPrompt,
   conversationHistory = [],
 }) {
+  // TEMPORARY — remove after one request
+  console.log('[SYSTEM PROMPT]\n' + systemPrompt);
   const response = await client.messages.create({
     model: "claude-sonnet-4-20250514",
     max_tokens: 500,
