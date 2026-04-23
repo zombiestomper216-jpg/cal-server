@@ -12,6 +12,8 @@ import rateLimit from "express-rate-limit";
 import { Resend } from "resend";
 import nodemailer from "nodemailer";
 import cron from "node-cron";
+import multer from "multer";
+import { createClient as createSupabaseClient } from "@supabase/supabase-js";
 
 import {
   CAL_SFW_SYSTEM_PROMPT,
@@ -35,6 +37,20 @@ const supabaseDb = new Pool({
   max: 3,
   idleTimeoutMillis: 10000,
   connectionTimeoutMillis: 5000
+});
+
+const supabase = createSupabaseClient(
+  process.env.SUPABASE_URL,
+  process.env.SERVICE_ROLE_KEY
+);
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = ["image/jpeg", "image/png", "image/webp"];
+    cb(null, allowed.includes(file.mimetype));
+  },
 });
 
 const app = express();
@@ -1858,10 +1874,13 @@ async function generateAndStoreSessionSummary({ messages, mode, deviceId, userId
 // -----------------------------------
 app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
   try {
-    const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId = null, imageBase64 = null, imageMimeType = null } =
+    const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId = null, imageBase64 = null, imageMimeType = null, image_url = null } =
       req.body;
-    if (imageBase64 && imageBase64.length > 4000000) {
-      return res.status(400).json({ error: 'Image too large. Please use a smaller image.' });
+    if (imageBase64 || imageMimeType) {
+      return res.status(400).json({ error: "imageBase64 is no longer supported. Upload via /upload-image and pass image_url." });
+    }
+    if (image_url && req.userId !== 3) {
+      return res.status(403).json({ ok: false, error: 'Image upload not available on this account.' });
     }
     const pace = paceFromReq(req.body);
 
@@ -2095,22 +2114,15 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       })
       .filter(Boolean);
 
-    // When an image is provided, upgrade the last user message to a multimodal content array
-    if (imageBase64 && conversationHistory.length > 0) {
+    // URL-based image (from Supabase Storage) — Joey-only, gated above
+    if (image_url && conversationHistory.length > 0) {
       const lastIdx = conversationHistory.length - 1;
       const lastMsg = conversationHistory[lastIdx];
       if (lastMsg.role === "user") {
         conversationHistory[lastIdx] = {
           ...lastMsg,
           content: [
-            {
-              type: "image",
-              source: {
-                type: "base64",
-                media_type: imageMimeType || "image/jpeg",
-                data: imageBase64
-              }
-            },
+            { type: "image", source: { type: "url", url: image_url } },
             { type: "text", text: lastMsg.content }
           ]
         };
@@ -2229,12 +2241,12 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       const msgThreadId = req.body.thread_id;
       const msgUserId = req.userId;
       const msgMode = req.body.mode || mode;
-      const saveMsg = (role, content) =>
+      const saveMsg = (role, content, imgUrl = null) =>
         db.query(
-          `INSERT INTO messages (thread_id, user_id, role, content, mode, created_at) VALUES ($1, $2, $3, $4, $5, NOW())`,
-          [msgThreadId, msgUserId, role, content, msgMode]
+          `INSERT INTO messages (thread_id, user_id, role, content, mode, image_url, created_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())`,
+          [msgThreadId, msgUserId, role, content, msgMode, imgUrl]
         ).catch(e => console.warn("[CLOUD-MSG] Save failed:", e?.message));
-      saveMsg("user", userText);
+      saveMsg("user", userText, image_url ?? null);
       saveMsg("assistant", reply);
     }
 
@@ -3295,19 +3307,44 @@ app.post("/messages", requireAuth, async (req, res) => {
     if (!userResult.rows.length || !userResult.rows[0].cloud_messages) {
       return res.status(403).json({ ok: false, error: "Cloud messages not enabled for this account." });
     }
-    const { threadId, role, content, mode } = req.body;
+    const { threadId, role, content, mode, image_url = null } = req.body;
     if (!threadId || !role || !content) {
       return res.status(400).json({ ok: false, error: "threadId, role, and content are required." });
     }
     const result = await db.query(
-      `INSERT INTO messages (thread_id, user_id, role, content, mode, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW()) RETURNING *`,
-      [threadId, req.userId, role, content, mode || null]
+      `INSERT INTO messages (thread_id, user_id, role, content, mode, image_url, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW()) RETURNING *`,
+      [threadId, req.userId, role, content, mode || null, image_url]
     );
     return res.json({ ok: true, message: result.rows[0] });
   } catch (err) {
     console.error("POST /messages error:", err);
     return res.status(500).json({ ok: false, error: "Failed to save message." });
+  }
+});
+
+app.post("/upload-image", requireAuth, upload.single("image"), async (req, res) => {
+  try {
+    if (req.userId !== 3) {
+      return res.status(403).json({ ok: false, error: "Image upload not available on this account." });
+    }
+    if (!req.file) {
+      return res.status(400).json({ ok: false, error: "No image file provided. Use multipart/form-data with field 'image'." });
+    }
+    const ext = req.file.mimetype.split("/")[1].replace("jpeg", "jpg");
+    const key = `user_${req.userId}/${Date.now()}_${crypto.randomBytes(6).toString("hex")}.${ext}`;
+    const { error: uploadError } = await supabase.storage
+      .from("chat-images")
+      .upload(key, req.file.buffer, { contentType: req.file.mimetype, upsert: false });
+    if (uploadError) {
+      console.error("[UPLOAD-IMAGE] Supabase upload error:", uploadError);
+      return res.status(500).json({ ok: false, error: "Image upload failed." });
+    }
+    const { data: urlData } = supabase.storage.from("chat-images").getPublicUrl(key);
+    return res.json({ ok: true, url: urlData.publicUrl });
+  } catch (err) {
+    console.error("[UPLOAD-IMAGE] Error:", err);
+    return res.status(500).json({ ok: false, error: "Image upload failed." });
   }
 });
 
