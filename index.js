@@ -723,7 +723,7 @@ function buildMemoryContext(allMemories, mode, messages = []) {
   // Diagnostic logging — remove after investigation
   console.log(`[MEMORY COUNT] ${selected.length} memories injected`);
   for (const m of selected) {
-    console.log(`[MEMORY INJECT] ${m.key}: ${m.value}`);
+    console.log(`[MEMORY INJECT] [p${m.priority ?? 0}] ${m.key}: ${m.value}`);
   }
 
   return selected;
