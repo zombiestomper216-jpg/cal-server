@@ -2114,6 +2114,29 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
       })
       .filter(Boolean);
 
+    // Strip image blocks from all historical messages to avoid Anthropic's
+    // 8000-pixel dimension limit errors on replayed context. The current
+    // turn's last message is the exception — it gets the live image_url below.
+    if (conversationHistory.length > 1) {
+      for (let i = 0; i < conversationHistory.length - 1; i++) {
+        const msg = conversationHistory[i];
+        if (Array.isArray(msg.content)) {
+          const hasImage = msg.content.some((b) => b.type === "image");
+          if (hasImage) {
+            const text = msg.content
+              .filter((b) => b.type === "text")
+              .map((b) => b.text)
+              .join(" ")
+              .trim();
+            conversationHistory[i] = {
+              ...msg,
+              content: text ? `[image archived] ${text}` : "[image archived]",
+            };
+          }
+        }
+      }
+    }
+
     // URL-based image (from Supabase Storage) — Joey-only, gated above
     if (image_url && conversationHistory.length > 0) {
       const lastIdx = conversationHistory.length - 1;
