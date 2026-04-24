@@ -2275,7 +2275,9 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
 
     return res.json({ ok: true, reply, messages: messages_out, easterEgg: null });
   } catch (err) {
-    console.error("CHAT ERROR:", err);
+    console.error("CHAT ERROR message:", err.message);
+    console.error("CHAT ERROR status:", err.status ?? err.statusCode ?? "n/a");
+    console.error("CHAT ERROR stack:", err.stack);
     return res.status(500).json({ ok: false, error: "Chat failed" });
   }
 });
