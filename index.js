@@ -704,6 +704,10 @@ function buildMemoryContext(allMemories, mode, messages = []) {
     ...worldDetailPool.slice(WORLD_DETAIL_SLOTS),
     ...sorted.filter(m => m.type !== "routine" && m.type !== "world_detail"),
   ].sort((a, b) => {
+    // Priority (highest first); missing/null/undefined treated as 0
+    const prioA = Number(a.priority) || 0;
+    const prioB = Number(b.priority) || 0;
+    if (prioA !== prioB) return prioB - prioA;
     const relA = relevance(a);
     const relB = relevance(b);
     if (relA !== relB) return relB - relA;
