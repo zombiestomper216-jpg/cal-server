@@ -3352,14 +3352,16 @@ app.get("/threads", requireAuth, async (req, res) => {
   try {
     if (!db) return res.status(503).json({ ok: false, error: "Database unavailable." });
     const result = await db.query(
-      `SELECT thread_id,
+      `SELECT m.thread_id,
               COUNT(*) as message_count,
-              MAX(created_at) as last_message_at,
-              MIN(created_at) as first_message_at
-       FROM messages
-       WHERE user_id = $1
-       GROUP BY thread_id
-       ORDER BY MAX(created_at) DESC
+              MAX(m.created_at) as last_message_at,
+              MIN(m.created_at) as first_message_at,
+              t.title
+       FROM messages m
+       LEFT JOIN threads t ON t.id = m.thread_id
+       WHERE m.user_id = $1
+       GROUP BY m.thread_id, t.title
+       ORDER BY MAX(m.created_at) DESC
        LIMIT 10`,
       [req.userId]
     );
@@ -3367,6 +3369,45 @@ app.get("/threads", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("GET /threads error:", err);
     return res.status(500).json({ ok: false, error: "Failed to fetch threads." });
+  }
+});
+
+app.patch("/threads/:id", requireAuth, async (req, res) => {
+  try {
+    if (!db) return res.status(503).json({ ok: false, error: "Database unavailable." });
+
+    const threadId = parseInt(req.params.id, 10);
+    if (!threadId) return res.status(400).json({ ok: false, error: "Invalid thread ID." });
+
+    let { title } = req.body;
+    if (title !== null && title !== undefined) {
+      if (typeof title !== "string")
+        return res.status(400).json({ ok: false, error: "title must be a string or null." });
+      title = title.trim();
+      if (title.length === 0)
+        return res.status(400).json({ ok: false, error: "title cannot be only whitespace." });
+      if (title.length > 100)
+        return res.status(400).json({ ok: false, error: "title must be 100 characters or fewer." });
+    } else {
+      title = null;
+    }
+
+    const threadCheck = await db.query("SELECT id FROM threads WHERE id = $1", [threadId]);
+    if (threadCheck.rowCount === 0)
+      return res.status(404).json({ ok: false, error: "Thread not found." });
+
+    const ownerCheck = await db.query(
+      "SELECT 1 FROM messages WHERE thread_id = $1 AND user_id = $2 LIMIT 1",
+      [threadId, req.userId]
+    );
+    if (ownerCheck.rowCount === 0)
+      return res.status(403).json({ ok: false, error: "Forbidden." });
+
+    await db.query("UPDATE threads SET title = $1 WHERE id = $2", [title, threadId]);
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("PATCH /threads/:id error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to update thread title." });
   }
 });
 
