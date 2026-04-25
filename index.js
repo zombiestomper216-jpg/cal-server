@@ -1820,7 +1820,7 @@ function dedupeDetectedMemories(memories) {
 async function generateSummaryText(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return "";
   const completion = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4-6",
     system: SESSION_SUMMARY_PROMPT,
     messages: messages
       .filter((m) => m.role === "user" || m.role === "assistant")
@@ -1835,7 +1835,7 @@ async function generateSummaryText(messages) {
 async function generateThreadTitle(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return "";
   const completion = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4-6",
     system: THREAD_TITLE_PROMPT,
     messages: messages
       .filter((m) => m.role === "user" || m.role === "assistant")
@@ -2077,7 +2077,7 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
           : 0.85
         : 0.7;
 
-    const model = "claude-sonnet-4-20250514";
+    const model = "claude-sonnet-4-6";
 
     let fullSystemPrompt = systemPrompt;
 
@@ -2902,7 +2902,7 @@ async function generateReEngagement(deviceId, userId, mode) {
 
   // 6. Generate via Anthropic
   const completion = await anthropic.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4-6",
     system: systemPrompt,
     messages: [{ role: "user", content: "[System: generate a re-engagement message for this user]" }],
     temperature: 0.85,
@@ -3072,7 +3072,7 @@ What Cal knows about Joey:
 - ${truncMem2}`;
 
     const decisionCall = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: decisionSystemPrompt,
       messages: [{ role: "user", content: decisionUserMessage }],
       max_tokens: 60,
@@ -3120,7 +3120,7 @@ Top memories:
 Should Cal reach out right now?`;
 
     const completion = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
+      model: "claude-sonnet-4-6",
       system: systemPrompt,
       messages: [{ role: "user", content: userMessage }],
       max_tokens: 200,
