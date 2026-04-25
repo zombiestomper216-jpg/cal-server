@@ -3612,25 +3612,26 @@ app.post("/webhooks/patreon", express.raw({ type: "application/json" }), async (
       [code, tierConfig.tier, founder]
     );
 
-    const tierDisplayName = tierName;
-    const emailText = [
-      `Your Cal invite code: ${code}`,
-      "",
-      "Go to calafterdark.com, create your account, and enter this code when prompted.",
-      "",
-      `This code is yours. It's single-use and tied to your ${tierDisplayName} subscription.`,
-      "",
-      "Welcome.",
-      "— Cal",
-    ].join("\n");
-
     if (gmailTransporter) {
       try {
         await gmailTransporter.sendMail({
           from: process.env.GMAIL_USER,
           to: email,
-          subject: "You're in. Here's your Cal access code.",
-          text: emailText,
+          subject: `You're in. Here's your Cal invite code.`,
+          html: `
+  <div style="background:#161c22;color:#ccd4d8;font-family:'DM Sans',system-ui,sans-serif;font-weight:300;max-width:520px;margin:0 auto;padding:2.5rem 2rem;">
+    <p style="font-family:Georgia,serif;font-size:1.4rem;color:#c8a96e;margin-bottom:1.5rem;">Cal After Dark</p>
+    <p style="font-size:1rem;line-height:1.7;margin-bottom:1rem;">You're in. Here's your invite code:</p>
+    <p style="font-size:2rem;font-family:Georgia,serif;color:#c8a96e;letter-spacing:0.15em;margin:1.5rem 0;">${code}</p>
+    <p style="font-size:0.9rem;line-height:1.7;color:#7a8a92;margin-bottom:0.75rem;">To get started:</p>
+    <ol style="font-size:0.9rem;line-height:2;color:#7a8a92;padding-left:1.25rem;margin-bottom:1.5rem;">
+      <li>Download the app at <a href="https://calafterdark.com/download" style="color:#c8a96e;">calafterdark.com/download</a></li>
+      <li>Open it and enter your invite code on the welcome screen</li>
+      <li>Cal's waiting</li>
+    </ol>
+    <p style="font-size:0.8rem;color:#4a5a62;border-top:0.5px solid #2a3540;padding-top:1rem;margin-top:1rem;">Cal After Dark · For gay and queer men + they/them users · 18+</p>
+  </div>
+`,
         });
         console.log("[PATREON-WEBHOOK] Invite sent to:", email, "code:", code, "tier:", tierConfig.tier);
       } catch (emailErr) {
