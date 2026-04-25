@@ -3323,11 +3323,24 @@ app.get("/messages/:threadId", requireAuth, async (req, res) => {
       return res.status(403).json({ ok: false, error: "Cloud messages not enabled for this account." });
     }
     const { threadId } = req.params;
-    const result = await db.query(
-      "SELECT * FROM messages WHERE thread_id = $1 AND user_id = $2 ORDER BY created_at ASC",
-      [threadId, req.userId]
-    );
-    return res.json({ ok: true, messages: result.rows });
+    const limit = Math.min(parseInt(req.query.limit, 10) || 30, 100);
+    const before = req.query.before;
+
+    let query, params;
+    if (before) {
+      query =
+        "SELECT * FROM messages WHERE thread_id = $1 AND user_id = $2 AND created_at < $3 ORDER BY created_at DESC LIMIT $4";
+      params = [threadId, req.userId, before, limit + 1];
+    } else {
+      query =
+        "SELECT * FROM messages WHERE thread_id = $1 AND user_id = $2 ORDER BY created_at DESC LIMIT $3";
+      params = [threadId, req.userId, limit + 1];
+    }
+
+    const result = await db.query(query, params);
+    const hasMore = result.rows.length > limit;
+    const messages = result.rows.slice(0, limit).reverse();
+    return res.json({ ok: true, messages, hasMore });
   } catch (err) {
     console.error("GET /messages/:threadId error:", err);
     return res.status(500).json({ ok: false, error: "Failed to fetch messages." });
