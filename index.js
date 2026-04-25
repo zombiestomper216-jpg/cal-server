@@ -14,6 +14,7 @@ import nodemailer from "nodemailer";
 import cron from "node-cron";
 import multer from "multer";
 import { createClient as createSupabaseClient } from "@supabase/supabase-js";
+import sharp from "sharp";
 
 import {
   CAL_SFW_SYSTEM_PROMPT,
@@ -52,6 +53,16 @@ const upload = multer({
     cb(null, allowed.includes(file.mimetype));
   },
 });
+
+async function resizeBufferIfNeeded(buffer) {
+  const MAX_DIMENSION = 2000;
+  const img = sharp(buffer);
+  const { width, height } = await img.metadata();
+  if (!width || !height || (width <= MAX_DIMENSION && height <= MAX_DIMENSION)) return buffer;
+  return img
+    .resize(MAX_DIMENSION, MAX_DIMENSION, { fit: "inside", withoutEnlargement: true })
+    .toBuffer();
+}
 
 const app = express();
 app.set('trust proxy', 1);
@@ -3383,9 +3394,10 @@ app.post("/upload-image", requireAuth, upload.single("image"), async (req, res) 
     }
     const ext = req.file.mimetype.split("/")[1].replace("jpeg", "jpg");
     const key = `user_${req.userId}/${Date.now()}_${crypto.randomBytes(6).toString("hex")}.${ext}`;
+    const processedBuffer = await resizeBufferIfNeeded(req.file.buffer);
     const { error: uploadError } = await supabase.storage
       .from("chat-images")
-      .upload(key, req.file.buffer, { contentType: req.file.mimetype, upsert: false });
+      .upload(key, processedBuffer, { contentType: req.file.mimetype, upsert: false });
     if (uploadError) {
       console.error("[UPLOAD-IMAGE] Supabase upload error:", uploadError);
       return res.status(500).json({ ok: false, error: "Image upload failed." });
