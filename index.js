@@ -1819,12 +1819,16 @@ function dedupeDetectedMemories(memories) {
 // -----------------------------------
 async function generateSummaryText(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return "";
+  const summaryMsgs = messages
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map((m) => ({ role: m.role, content: m.content }));
+  if (summaryMsgs.length && summaryMsgs[summaryMsgs.length - 1].role === "assistant") {
+    summaryMsgs.push({ role: "user", content: "Please summarize the above conversation." });
+  }
   const completion = await anthropic.messages.create({
     model: "claude-sonnet-4-6",
     system: SESSION_SUMMARY_PROMPT,
-    messages: messages
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role, content: m.content })),
+    messages: summaryMsgs,
     temperature: 0.3,
     max_tokens: 200,
   });
@@ -1834,12 +1838,16 @@ async function generateSummaryText(messages) {
 
 async function generateThreadTitle(messages) {
   if (!Array.isArray(messages) || messages.length === 0) return "";
+  const titleMsgs = messages
+    .filter((m) => m.role === "user" || m.role === "assistant")
+    .map((m) => ({ role: m.role, content: m.content }));
+  if (titleMsgs.length && titleMsgs[titleMsgs.length - 1].role === "assistant") {
+    titleMsgs.push({ role: "user", content: "Please generate a title for the above conversation." });
+  }
   const completion = await anthropic.messages.create({
     model: "claude-sonnet-4-6",
     system: THREAD_TITLE_PROMPT,
-    messages: messages
-      .filter((m) => m.role === "user" || m.role === "assistant")
-      .map((m) => ({ role: m.role, content: m.content })),
+    messages: titleMsgs,
     temperature: 0.3,
     max_tokens: 20,
   });
