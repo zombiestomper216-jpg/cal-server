@@ -3040,6 +3040,11 @@ async function runProactiveCalDecision() {
     );
     const todayCount = parseInt(todayCountResult.rows[0]?.cnt ?? "0", 10);
 
+    const weather = await fetchChicagoWeather();
+    const weatherLine = weather
+      ? `Chicago weather: ${weather.condition}, ${weather.temp}°F (feels like ${weather.feelsLike}°F).`
+      : 'Weather data unavailable.';
+
     // 4. Lean yes/no decision call — minimal context, cheap
     const now = new Date();
     const chicagoTime = new Intl.DateTimeFormat("en-US", {
@@ -3082,6 +3087,7 @@ Reply with JSON only: {"reach_out": true/false, "reason": "one sentence"}`;
     const decisionUserMessage = `Current time: ${chicagoTime} (Chicago)
 Time of day: ${timeOfDay}
 Day type: ${dayType}
+Weather: ${weatherLine}
 Times Cal has reached out today: ${todayCount}
 Hours since last outreach: ${lastOutreachHours}h
 
@@ -3129,6 +3135,7 @@ Rules:
 - reach_out: false is always the right call if it doesn't feel right`;
 
     const userMessage = `Current time: ${dayPart || chicagoTime}, ${timePart || ""}
+Weather: ${weatherLine}
 Hours since last message to Joey: ${lastOutreachHours}
 Last conversation summary: ${summary}
 Top memories:
