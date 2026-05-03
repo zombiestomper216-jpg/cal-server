@@ -294,6 +294,19 @@ async function runMigrations() {
     `CREATE INDEX IF NOT EXISTS idx_invite_codes_code ON invite_codes (code)`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS founder BOOLEAN DEFAULT FALSE`,
     `ALTER TABLE users ADD COLUMN IF NOT EXISTS device_id VARCHAR`,
+    // Patreon subscription state
+    `CREATE TABLE IF NOT EXISTS patreon_subscriptions (
+      id SERIAL PRIMARY KEY,
+      patreon_member_id VARCHAR(255) NOT NULL UNIQUE,
+      user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+      status VARCHAR(20) NOT NULL DEFAULT 'active',
+      tier VARCHAR(50),
+      created_at TIMESTAMP DEFAULT now(),
+      updated_at TIMESTAMP DEFAULT now()
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_patreon_subscriptions_member_id ON patreon_subscriptions(patreon_member_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_patreon_subscriptions_user_id ON patreon_subscriptions(user_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_patreon_subscriptions_status ON patreon_subscriptions(status)`,
   ];
   for (const sql of migrations) {
     try {
@@ -305,6 +318,41 @@ async function runMigrations() {
   console.log("[MIGRATION] Startup migrations complete.");
 }
 runMigrations();
+
+// One-time safety: ensure patreon_subscriptions exists
+if (db) {
+  (async () => {
+    try {
+      await db.query(`
+        CREATE TABLE IF NOT EXISTS patreon_subscriptions (
+          id SERIAL PRIMARY KEY,
+          patreon_member_id VARCHAR(255) NOT NULL UNIQUE,
+          user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+          status VARCHAR(20) NOT NULL DEFAULT 'active',
+          tier VARCHAR(50),
+          created_at TIMESTAMP DEFAULT now(),
+          updated_at TIMESTAMP DEFAULT now()
+        )
+      `);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_patreon_subscriptions_member_id ON patreon_subscriptions(patreon_member_id)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_patreon_subscriptions_user_id ON patreon_subscriptions(user_id)`);
+      await db.query(`CREATE INDEX IF NOT EXISTS idx_patreon_subscriptions_status ON patreon_subscriptions(status)`);
+      console.log('[PATREON-SUB] patreon_subscriptions table confirmed.');
+    } catch (err) {
+      console.error('[PATREON-SUB] Table creation error:', err.message);
+    }
+  })();
+}
+
+async function checkSubscriptionActive(userId) {
+  if (userId === 3 || userId === 9) return true; // Joey, Nikki — always active
+  if (!db) return false;
+  const result = await db.query(
+    "SELECT 1 FROM patreon_subscriptions WHERE user_id = $1 AND status = 'active' LIMIT 1",
+    [userId]
+  );
+  return result.rows.length > 0;
+}
 
 if (db) {
   db.query(
@@ -3604,13 +3652,57 @@ app.post("/webhooks/patreon", express.raw({ type: "application/json" }), async (
     const payload = Buffer.isBuffer(req.body) ? JSON.parse(req.body.toString("utf8")) : req.body;
 
     const eventType = req.headers["x-patreon-event"];
-    if (eventType !== "members:pledge:create") {
+    const patreonMemberId = payload?.data?.id;
+    const member = payload?.data?.attributes;
+    const tierName = payload?.included?.find(
+      (r) => r.type === "tier" || r.type === "reward"
+    )?.attributes?.title || "";
+    const tierConfig = PATREON_TIER_MAP[tierName];
+    const mappedTier = tierConfig?.tier || null;
+
+    const ACTIVE_EVENTS = ["members:create", "members:pledge:create", "members:pledge:update"];
+    const INACTIVE_EVENTS = ["members:pledge:delete", "members:delete"];
+
+    if (INACTIVE_EVENTS.includes(eventType)) {
+      // Patron cancelled or was deleted — mark inactive
+      if (patreonMemberId && db) {
+        await db.query(
+          `INSERT INTO patreon_subscriptions (patreon_member_id, status, updated_at)
+           VALUES ($1, 'inactive', now())
+           ON CONFLICT (patreon_member_id)
+           DO UPDATE SET status = 'inactive', updated_at = now()`,
+          [patreonMemberId]
+        );
+        console.log("[PATREON-WEBHOOK] Marked inactive:", patreonMemberId, "event:", eventType);
+      } else if (!db) {
+        console.warn("[PATREON-WEBHOOK] DB unavailable, could not mark inactive:", patreonMemberId);
+        return res.status(503).json({ ok: false, error: "Database not available." });
+      }
+      return res.status(200).json({ ok: true });
+    }
+
+    if (!ACTIVE_EVENTS.includes(eventType)) {
       return res.status(200).json({ ok: true, ignored: true });
     }
 
-    const member = payload?.data?.attributes;
-    if (!member || member.patron_status !== "active_patron") {
-      return res.status(200).json({ ok: true, ignored: true });
+    // Active event — upsert subscription state first
+    const isActivePledge = member?.patron_status === "active_patron";
+    const newStatus = isActivePledge ? "active" : "inactive";
+
+    if (patreonMemberId && db) {
+      await db.query(
+        `INSERT INTO patreon_subscriptions (patreon_member_id, status, tier, updated_at)
+         VALUES ($1, $2, $3, now())
+         ON CONFLICT (patreon_member_id)
+         DO UPDATE SET status = $2, tier = COALESCE($3, patreon_subscriptions.tier), updated_at = now()`,
+        [patreonMemberId, newStatus, mappedTier]
+      );
+      console.log("[PATREON-WEBHOOK] Upserted subscription:", patreonMemberId, "status:", newStatus, "tier:", mappedTier, "event:", eventType);
+    }
+
+    // Only send invite code on pledge:create for active patrons
+    if (eventType !== "members:pledge:create" || !isActivePledge) {
+      return res.status(200).json({ ok: true });
     }
 
     const email = member.email;
@@ -3619,12 +3711,6 @@ app.post("/webhooks/patreon", express.raw({ type: "application/json" }), async (
       return res.status(400).json({ ok: false, error: "No email in payload." });
     }
 
-    // Tier name comes from the first included reward/tier object
-    const tierName = payload?.included?.find(
-      (r) => r.type === "tier" || r.type === "reward"
-    )?.attributes?.title || "";
-
-    const tierConfig = PATREON_TIER_MAP[tierName];
     if (!tierConfig) {
       console.warn("[PATREON-WEBHOOK] Unknown tier:", tierName);
       return res.status(200).json({ ok: true, ignored: true, reason: "unknown tier" });
@@ -3685,6 +3771,34 @@ app.post("/webhooks/patreon", express.raw({ type: "application/json" }), async (
   } catch (err) {
     console.error("[PATREON-WEBHOOK] ERROR:", err);
     return res.status(500).json({ ok: false, error: "Webhook processing failed." });
+  }
+});
+
+// -----------------------------------
+// Patreon Link (called during PWA onboarding to bind member_id → user_id)
+// TODO before PWA launch: add X-Internal-Secret header check against env var
+// -----------------------------------
+app.post("/patreon/link", async (req, res) => {
+  const { patreon_member_id, user_id } = req.body;
+  if (!patreon_member_id || !user_id) {
+    return res.status(400).json({ ok: false, error: "Missing patreon_member_id or user_id." });
+  }
+  if (!db) {
+    return res.status(503).json({ ok: false, error: "Database not available." });
+  }
+  try {
+    const result = await db.query(
+      "UPDATE patreon_subscriptions SET user_id = $1, updated_at = now() WHERE patreon_member_id = $2",
+      [user_id, patreon_member_id]
+    );
+    if (result.rowCount === 0) {
+      return res.status(404).json({ ok: false, error: "Patreon member not found." });
+    }
+    console.log("[PATREON-LINK] Linked member", patreon_member_id, "→ user", user_id);
+    return res.status(200).json({ ok: true });
+  } catch (err) {
+    console.error("[PATREON-LINK] ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Link failed." });
   }
 });
 
