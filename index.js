@@ -1190,9 +1190,6 @@ app.post("/signup", authLimiter, async (req, res) => {
     if (typeof username !== "string" || username.length < 3 || username.length > 50) {
       return res.status(400).json({ ok: false, error: "Username must be 3-50 characters." });
     }
-    if (!/^[a-zA-Z0-9_]+$/.test(username)) {
-      return res.status(400).json({ ok: false, error: "Username may only contain letters, numbers, and underscores." });
-    }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({ ok: false, error: "Invalid email format." });
     }
