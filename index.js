@@ -3688,14 +3688,15 @@ app.post("/webhooks/patreon", express.raw({ type: "application/json" }), async (
     // Active event — upsert subscription state first
     const isActivePledge = member?.patron_status === "active_patron";
     const newStatus = isActivePledge ? "active" : "inactive";
+    const email = member?.email || null;
 
     if (patreonMemberId && db) {
       await db.query(
-        `INSERT INTO patreon_subscriptions (patreon_member_id, status, tier, updated_at)
-         VALUES ($1, $2, $3, now())
+        `INSERT INTO patreon_subscriptions (patreon_member_id, status, tier, patreon_email, updated_at)
+         VALUES ($1, $2, $3, $4, now())
          ON CONFLICT (patreon_member_id)
-         DO UPDATE SET status = $2, tier = COALESCE($3, patreon_subscriptions.tier), updated_at = now()`,
-        [patreonMemberId, newStatus, mappedTier]
+         DO UPDATE SET status = $2, tier = COALESCE($3, patreon_subscriptions.tier), patreon_email = COALESCE($4, patreon_subscriptions.patreon_email), updated_at = now()`,
+        [patreonMemberId, newStatus, mappedTier, email]
       );
       console.log("[PATREON-WEBHOOK] Upserted subscription:", patreonMemberId, "status:", newStatus, "tier:", mappedTier, "event:", eventType);
     }
@@ -3705,7 +3706,6 @@ app.post("/webhooks/patreon", express.raw({ type: "application/json" }), async (
       return res.status(200).json({ ok: true });
     }
 
-    const email = member.email;
     if (!email) {
       console.warn("[PATREON-WEBHOOK] No email in payload");
       return res.status(400).json({ ok: false, error: "No email in payload." });
@@ -3776,9 +3776,12 @@ app.post("/webhooks/patreon", express.raw({ type: "application/json" }), async (
 
 // -----------------------------------
 // Patreon Link (called during PWA onboarding to bind member_id → user_id)
-// TODO before PWA launch: add X-Internal-Secret header check against env var
 // -----------------------------------
 app.post("/patreon/link", async (req, res) => {
+  const secret = req.headers['x-internal-secret'];
+  if (!secret || secret !== process.env.INTERNAL_SECRET) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   const { patreon_member_id, user_id } = req.body;
   if (!patreon_member_id || !user_id) {
     return res.status(400).json({ ok: false, error: "Missing patreon_member_id or user_id." });
