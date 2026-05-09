@@ -66,7 +66,24 @@ async function resizeBufferIfNeeded(buffer) {
 
 const app = express();
 app.set('trust proxy', 1);
-app.use(cors());
+const allowedOrigins = [
+  'https://calafterdark.com',
+  'https://app.calafterdark.com',
+  'https://calafterdark-pwa.netlify.app',
+  'http://localhost:5173',
+  'http://localhost:3000',
+]
+
+app.use(cors({
+  origin: function (origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true)
+    } else {
+      callback(new Error('Not allowed by CORS'))
+    }
+  },
+  credentials: true,
+}));
 app.use(express.json({ limit: '10mb' }));
 app.use(helmet());
 
@@ -88,11 +105,15 @@ const authLimiter = rateLimit({
 });
 
 const chatLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 20,
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 40,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { ok: false, error: "Too many requests, please slow down." },
+  skip: (req) => {
+    const userId = req.userId || req.body?.user_id
+    return parseInt(userId) === 3
+  },
+  message: { ok: false, error: 'Too many messages. Please wait before sending more.' },
 });
 
 app.use(generalLimiter);
@@ -1940,7 +1961,7 @@ async function generateAndStoreSessionSummary({ messages, mode, deviceId, userId
 // -----------------------------------
 // Chat Endpoint
 // -----------------------------------
-app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
+app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
   try {
     const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId = null, imageBase64 = null, imageMimeType = null, image_url = null } =
       req.body;
@@ -1956,6 +1977,11 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     const weatherPromise = fetchChicagoWeather();
 
     const userText = extractLastUserText(messages);
+
+    const rawMessage = req.body?.messages?.[0]?.content || ''
+    if (rawMessage.length > 4000) {
+      return res.status(400).json({ ok: false, error: 'Message too long.' })
+    }
 
     // Easter egg detection
     const easterEggTriggered = checkEasterEgg(userText);
@@ -2005,13 +2031,23 @@ app.post("/chat", chatLimiter, requireAuth, async (req, res) => {
     // -----------------------------------
     // After Dark Adult Verification Gate
     // -----------------------------------
-    if (mode === "after_dark" && !isAdultVerifiedToken(req)) {
-      return res.json({
-        ok: true,
-        reply: "After Dark mode isn't available on your account. You can switch to SFW in Settings.",
-        blocked: true,
-        reason: "adult_verification_required",
-      });
+    if (mode === "after_dark") {
+      if (req.userId && db) {
+        const userRow = await db.query(
+          'SELECT adult_verified FROM users WHERE id = $1',
+          [req.userId]
+        )
+        if (!userRow.rows[0]?.adult_verified) {
+          return res.status(403).json({ ok: false, error: 'Age verification required.' })
+        }
+      } else if (!isAdultVerifiedToken(req)) {
+        return res.json({
+          ok: true,
+          reply: "After Dark mode isn't available on your account. You can switch to SFW in Settings.",
+          blocked: true,
+          reason: "adult_verification_required",
+        });
+      }
     }
 
     // -----------------------------------
