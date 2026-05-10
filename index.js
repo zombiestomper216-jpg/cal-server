@@ -120,6 +120,7 @@ app.use(generalLimiter);
 
 // Toggle verbose debug without code changes (set on Railway)
 const DEBUG_CHAT = String(process.env.DEBUG_CHAT || "").toLowerCase() === "true";
+const INTERNAL_SECRET = process.env.INTERNAL_SECRET;
 
 const MESSAGE_LIMITS = {
   just_right: 20,
@@ -3812,8 +3813,8 @@ app.post("/webhooks/patreon", express.raw({ type: "application/json" }), async (
 // -----------------------------------
 app.post("/patreon/link", async (req, res) => {
   const secret = req.headers['x-internal-secret'];
-  if (!secret || secret !== process.env.INTERNAL_SECRET) {
-    return res.status(403).json({ error: 'Forbidden' });
+  if (!secret || secret !== INTERNAL_SECRET) {
+    return res.status(401).json({ error: 'Unauthorized' });
   }
   const { patreon_member_id, user_id } = req.body;
   if (!patreon_member_id || !user_id) {
