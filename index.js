@@ -1045,7 +1045,7 @@ function requireAuth(req, res, next) {
   // --- JWT path ---
   const jwtPayload = verifyJwt(token);
   if (jwtPayload && jwtPayload.sub) {
-    req.userId = jwtPayload.sub;
+    req.userId = parseInt(jwtPayload.sub, 10);
     req.adultVerified = Boolean(jwtPayload.adult);
     req.founder = Boolean(jwtPayload.founder);
     req.userCapability = jwtPayload.capability || "just_right";
