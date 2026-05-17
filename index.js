@@ -3525,7 +3525,7 @@ app.get("/threads", requireAuth, async (req, res) => {
               t.title
        FROM messages m
        LEFT JOIN threads t ON t.id = m.thread_id
-       WHERE m.user_id = $1
+       WHERE m.user_id = $1::integer
        GROUP BY m.thread_id, t.title
        ORDER BY MAX(m.created_at) DESC
        LIMIT 10`,
