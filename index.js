@@ -2278,8 +2278,9 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
     });
 
     const rawReply = calResponse.reply ?? "(no reply)";
-    const reply = softenEarlySnap(rawReply, messages).replace(/—/g, ",");
+    let reply = softenEarlySnap(rawReply, messages).replace(/—/g, ",");
     const messages_out = splitIntoMessages(reply);
+    reply = reply.split('|||').map(s => s.trim()).filter(Boolean).join('\n\n');
 
     // Best-effort DB write (never blocks chat)
     if (db) {
