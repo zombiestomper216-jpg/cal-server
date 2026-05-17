@@ -2365,8 +2365,8 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
     }
 
     // Cloud message storage (fire-and-forget, only for cloud_messages users)
-    if (db && cloudMessages && req.userId && req.body.thread_id) {
-      const msgThreadId = req.body.thread_id;
+    if (db && cloudMessages && req.userId && threadId) {
+      const msgThreadId = threadId;
       const msgUserId = req.userId;
       const msgMode = req.body.mode || mode;
       const saveMsg = (role, content, imgUrl = null) =>
@@ -2378,7 +2378,7 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       saveMsg("assistant", reply);
     }
 
-    return res.json({ ok: true, reply, messages: messages_out, easterEgg: null });
+    return res.json({ ok: true, reply, messages: messages_out, threadId, easterEgg: null });
   } catch (err) {
     console.error("CHAT ERROR message:", err.message);
     console.error("CHAT ERROR status:", err.status ?? err.statusCode ?? "n/a");
