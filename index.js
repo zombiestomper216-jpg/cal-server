@@ -1966,6 +1966,20 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
   try {
     const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId = null, imageBase64 = null, imageMimeType = null, image_url = null } =
       req.body;
+
+    let effectiveThreadId = threadId;
+    if (!effectiveThreadId && req.userId) {
+      try {
+        const threadResult = await db.query(
+          'INSERT INTO threads (title, created_at) VALUES ($1, NOW()) RETURNING id',
+          ['New Conversation']
+        );
+        effectiveThreadId = threadResult.rows[0].id;
+      } catch (e) {
+        // non-fatal — continue without a thread id
+      }
+    }
+
     if (imageBase64 || imageMimeType) {
       return res.status(400).json({ error: "imageBase64 is no longer supported. Upload via /upload-image and pass image_url." });
     }
@@ -2311,7 +2325,7 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       (async () => {
         try {
           const detected = detectMemoriesHeuristic(userText);
-          const recurring = chatDeviceId ? trackRecurringThemes(chatDeviceId, userText, threadId ?? crypto.randomUUID()) : [];
+          const recurring = chatDeviceId ? trackRecurringThemes(chatDeviceId, userText, effectiveThreadId ?? crypto.randomUUID()) : [];
           const effectiveDeviceId = chatDeviceId || `user_${chatUserId}`;
 
           for (const mem of detected) {
@@ -2360,13 +2374,13 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
         mode,
         deviceId: chatDeviceId,
         userId: chatUserId,
-        threadId,
+        threadId: effectiveThreadId,
       }).catch(e => console.warn("[AUTO-SUMMARIZE] Failed:", e?.message));
     }
 
     // Cloud message storage (fire-and-forget, only for cloud_messages users)
-    if (db && cloudMessages && req.userId && threadId) {
-      const msgThreadId = threadId;
+    if (db && cloudMessages && req.userId && effectiveThreadId) {
+      const msgThreadId = effectiveThreadId;
       const msgUserId = req.userId;
       const msgMode = req.body.mode || mode;
       const saveMsg = (role, content, imgUrl = null) =>
@@ -2378,7 +2392,7 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       saveMsg("assistant", reply);
     }
 
-    return res.json({ ok: true, reply, messages: messages_out, threadId, easterEgg: null });
+    return res.json({ ok: true, reply, messages: messages_out, threadId: effectiveThreadId, easterEgg: null });
   } catch (err) {
     console.error("CHAT ERROR message:", err.message);
     console.error("CHAT ERROR status:", err.status ?? err.statusCode ?? "n/a");
