@@ -1510,23 +1510,22 @@ app.post("/redeem-code", authLimiter, async (req, res) => {
 });
 
 app.post("/forgot-password", authLimiter, async (req, res) => {
-  const genericResponse = { ok: true, message: "If that email is registered, a reset link has been sent." };
-
   try {
     const { email } = req.body || {};
-    if (!email || !db) return res.json(genericResponse);
+    if (!email || !db) return res.json({ ok: true });
 
     const result = await db.query("SELECT id FROM users WHERE email = $1", [String(email).toLowerCase()]);
-    if (result.rows.length === 0) return res.json(genericResponse);
+    if (result.rows.length === 0) return res.json({ ok: true });
 
     const userId = result.rows[0].id;
-    const resetToken = crypto.randomUUID();
-    const expiresAt = new Date(Date.now() + 60 * 60 * 1000); // 1 hour
+    const resetToken = crypto.randomBytes(32).toString("hex");
 
     await db.query(
-      "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, $3)",
-      [userId, resetToken, expiresAt]
+      "INSERT INTO password_reset_tokens (user_id, token, expires_at) VALUES ($1, $2, NOW() + INTERVAL '1 hour')",
+      [userId, resetToken]
     );
+
+    const resetUrl = `https://app.calafterdark.com/reset?token=${resetToken}`;
 
     if (resend) {
       try {
@@ -1534,8 +1533,8 @@ app.post("/forgot-password", authLimiter, async (req, res) => {
           from: EMAIL_FROM,
           to: email,
           subject: "Cal — Password Reset",
-          text: `Reset your password: ${APP_URL}/reset-password?token=${resetToken}\n\nThis link expires in 1 hour.`,
-          html: `<p>Reset your password:</p><p><a href="${APP_URL}/reset-password?token=${resetToken}">Click here</a></p><p>This link expires in 1 hour.</p>`,
+          text: `Reset your password: ${resetUrl}\n\nThis link expires in 1 hour.`,
+          html: `<p>Reset your password:</p><p><a href="${resetUrl}">Click here</a></p><p>This link expires in 1 hour.</p>`,
         });
       } catch (emailErr) {
         console.warn("Failed to send reset email:", emailErr?.message || emailErr);
@@ -1544,10 +1543,10 @@ app.post("/forgot-password", authLimiter, async (req, res) => {
       console.warn("[FORGOT-PASSWORD] No RESEND_API_KEY configured. Reset token:", resetToken);
     }
 
-    return res.json(genericResponse);
+    return res.json({ ok: true });
   } catch (err) {
     console.error("FORGOT-PASSWORD ERROR:", err);
-    return res.json(genericResponse);
+    return res.json({ ok: true });
   }
 });
 
@@ -1601,7 +1600,7 @@ app.post("/reset-password", authLimiter, async (req, res) => {
     );
 
     if (result.rows.length === 0) {
-      return res.status(400).json({ ok: false, error: "Invalid or expired reset token." });
+      return res.status(400).json({ ok: false, error: "Invalid or expired reset link." });
     }
 
     const { id: tokenId, user_id: userId } = result.rows[0];
@@ -1617,7 +1616,7 @@ app.post("/reset-password", authLimiter, async (req, res) => {
     await db.query("UPDATE password_reset_tokens SET used = TRUE WHERE id = $1", [tokenId]);
     console.log("RESET-PASSWORD: password updated for user_id:", userId, "hash_prefix:", passwordHash.substring(0, 7));
 
-    return res.json({ ok: true, message: "Password reset successfully." });
+    return res.json({ ok: true });
   } catch (err) {
     console.error("RESET-PASSWORD ERROR:", err);
     return res.status(500).json({ ok: false, error: "Password reset failed." });
