@@ -3577,6 +3577,47 @@ app.patch("/threads/:id", requireAuth, async (req, res) => {
   }
 });
 
+app.delete("/threads/:id", requireAuth, async (req, res) => {
+  try {
+    if (!db) return res.status(503).json({ ok: false, error: "Database unavailable." });
+
+    const threadId = parseInt(req.params.id, 10);
+    if (!threadId) return res.status(400).json({ ok: false, error: "Invalid thread ID." });
+
+    const threadCheck = await db.query("SELECT id FROM threads WHERE id = $1", [threadId]);
+    if (threadCheck.rowCount === 0)
+      return res.status(404).json({ ok: false, error: "Thread not found." });
+
+    const ownerCheck = await db.query(
+      "SELECT 1 FROM messages WHERE thread_id = $1 AND user_id = $2 LIMIT 1",
+      [threadId, req.userId]
+    );
+    if (ownerCheck.rowCount === 0)
+      return res.status(403).json({ ok: false, error: "Forbidden." });
+
+    const client = await db.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "DELETE FROM messages WHERE thread_id = $1 AND user_id = $2",
+        [threadId, req.userId]
+      );
+      await client.query("DELETE FROM threads WHERE id = $1", [threadId]);
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("DELETE /threads/:id error:", err);
+    return res.status(500).json({ ok: false, error: "Failed to delete thread." });
+  }
+});
+
 // -----------------------------------
 // Admin: Manual Notification Trigger (testing only)
 // -----------------------------------

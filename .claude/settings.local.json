@@ -11,7 +11,9 @@
       "Read(//c/Users/Joey/cal-app/hooks//**)",
       "Read(//c/Users/Joey/cal-app/components//**)",
       "Bash(wc -l /c/Users/Joey/cal-app/app/'\\(tabs\\)'/chat.tsx)",
-      "Bash(node -e ' *)"
+      "Bash(node -e ' *)",
+      "Bash(Find-Content -Path \"c:\\\\Users\\\\Joey\\\\cal-server\\\\index.js\" -Pattern \"app\\\\.patch.*threads\")",
+      "Bash(Select-Object -First 5)"
     ]
   }
 }
