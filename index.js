@@ -1963,8 +1963,9 @@ async function generateAndStoreSessionSummary({ messages, mode, deviceId, userId
 // -----------------------------------
 app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
   try {
-    const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId = null, imageBase64 = null, imageMimeType = null, image_url = null } =
+    const { messages = [], mode = "sfw", threadSummary = null, recentMessages = [], memories = [], threadId: threadIdCamel = null, thread_id: threadIdSnake = null, imageBase64 = null, imageMimeType = null, image_url = null } =
       req.body;
+    const threadId = threadIdCamel ?? threadIdSnake;
 
     let effectiveThreadId = threadId;
     if (!effectiveThreadId && req.userId) {
