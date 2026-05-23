@@ -188,6 +188,23 @@ async function fetchChicagoWeather() {
 // -----------------------------------
 function buildRealtimeContext(weather) {
   const now = new Date();
+
+  // Get Chicago-local day index (avoids UTC mismatch on Railway)
+  const chicagoDate = new Date(now.toLocaleString('en-US', { timeZone: 'America/Chicago' }));
+  const dayIndex = chicagoDate.getDay();
+
+  const CAL_DAILY_SCHEDULE = {
+    0: "Loose Sunday — Lou Mitchell's in the morning, long walk with Ashoka, no obligations.",
+    1: "Workshop day — music on, phone down, focused work.",
+    2: "Gym at 7am, workshop by 10.",
+    3: "Workshop day — music on, phone down, focused work. Velvet Hour tonight.",
+    4: "Gym at 7am, workshop by 10.",
+    5: "Workshop day — music on, phone down, focused work.",
+    6: "Gym at 7am, workshop by 10."
+  };
+
+  const calSchedule = CAL_DAILY_SCHEDULE[dayIndex];
+
   const tz = { timeZone: "America/Chicago" };
 
   const chicagoTime = new Intl.DateTimeFormat('en-US', {
@@ -213,6 +230,8 @@ function buildRealtimeContext(weather) {
   if (weather) {
     ctx += ` Chicago weather: ${weather.condition}, ${weather.temp}°F, feels like ${weather.feelsLike}°F.`;
   }
+
+  ctx += `\n\nCal's day: ${calSchedule}`;
 
   return ctx;
 }
