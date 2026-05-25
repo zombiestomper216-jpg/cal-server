@@ -4191,6 +4191,8 @@ ${memoryContext}
     });
 
     const decision = decisionResp.content[0]?.text?.trim().toUpperCase();
+    console.log('[presence/decide] raw decision:',
+      JSON.stringify(decisionResp.content[0]));
     console.log(`[presence/decide] ${userId}: ${decision} (${minutesSinceSpoke}min since spoke)`);
 
     if (decision !== "SPEAK") {
