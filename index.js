@@ -4197,6 +4197,10 @@ ${memoryContext}
       return res.json({ shouldSpeak: false });
     }
 
+    console.log('[presence/decide] building response content, frame:',
+      !!latestFrame, 'screen:', !!latestScreen,
+      'transcript:', latestTranscript?.slice(0, 30));
+
     // Step 2 — Sonnet generates Cal's ambient response
     const responseContent = [];
     responseContent.push({
