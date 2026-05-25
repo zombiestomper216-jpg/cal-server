@@ -4266,6 +4266,7 @@ ${memoryContext}
     return res.json({ shouldSpeak: true, response: calResponse });
   } catch (err) {
     console.error("[presence/decide] ERROR:", err);
+    console.error('[presence/decide] OUTER ERROR:', err.message, err.stack);
     return res.status(500).json({ error: "Decision failed" });
   }
 });
