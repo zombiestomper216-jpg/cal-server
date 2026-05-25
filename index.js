@@ -4227,6 +4227,7 @@ ${memoryContext}
 
     let pendingAudio = null;
     try {
+      console.log('[presence/decide] calling ElevenLabs...');
       const elevenResp = await fetch(
         'https://api.elevenlabs.io/v1/text-to-speech/S6P2anZqaDdE5ISBo5Bb',
         {
@@ -4242,6 +4243,7 @@ ${memoryContext}
           }),
         }
       );
+      console.log('[presence/decide] ElevenLabs status:', elevenResp.status);
       if (elevenResp.ok) {
         const audioBuffer = Buffer.from(await elevenResp.arrayBuffer());
         pendingAudio = audioBuffer.toString('base64');
