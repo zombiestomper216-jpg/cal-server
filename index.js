@@ -4225,9 +4225,39 @@ ${memoryContext}
     const calResponse = calResp.content[0]?.text?.trim();
     console.log(`[presence/decide] Cal says: "${calResponse}"`);
 
+    let pendingAudio = null;
+    try {
+      const elevenResp = await fetch(
+        'https://api.elevenlabs.io/v1/text-to-speech/S6P2anZqaDdE5ISBo5Bb',
+        {
+          method: 'POST',
+          headers: {
+            'xi-api-key': process.env.ELEVENLABS_API_KEY,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            text: calResponse,
+            model_id: 'eleven_flash_v2_5',
+            voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+          }),
+        }
+      );
+      if (elevenResp.ok) {
+        const audioBuffer = Buffer.from(await elevenResp.arrayBuffer());
+        pendingAudio = audioBuffer.toString('base64');
+        console.log(`[presence/decide] audio generated (${audioBuffer.length} bytes)`);
+      } else {
+        const errText = await elevenResp.text();
+        console.error('[presence/decide] ElevenLabs error:', elevenResp.status, errText);
+      }
+    } catch (elevenErr) {
+      console.error('[presence/decide] ElevenLabs error:', elevenErr.message);
+    }
+
     presenceContext[userId] = {
       ...presenceContext[userId],
       pendingResponse: calResponse,
+      pendingAudio,
       lastSpoke: Date.now(),
     };
 
@@ -4248,15 +4278,17 @@ app.get("/presence/check", async (req, res) => {
 
     const ctx = presenceContext[userId] || {};
     const pendingResponse = ctx.pendingResponse || null;
+    const pendingAudio = ctx.pendingAudio || null;
 
-    if (pendingResponse) {
+    if (pendingResponse || pendingAudio) {
       presenceContext[userId] = {
         ...presenceContext[userId],
         pendingResponse: null,
+        pendingAudio: null,
       };
     }
 
-    return res.json({ pendingResponse });
+    return res.json({ pendingResponse, pendingAudio });
   } catch (err) {
     console.error("[presence/check] ERROR:", err);
     return res.status(500).json({ error: "Check failed" });
