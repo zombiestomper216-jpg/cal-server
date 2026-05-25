@@ -28,6 +28,11 @@ import { sendMessageToCal, checkEasterEgg } from "./cal.js";
 import { generateCalMessage } from "./generateCalMessage.js";
 import { start as startNotificationScheduler } from "./notificationScheduler.js";
 
+// -----------------------------------
+// Presence context (in-memory, per userId)
+// -----------------------------------
+const presenceContext = {};
+
 dotenv.config();
 
 const { Pool } = pg;
@@ -3916,6 +3921,74 @@ app.post("/patreon/link", async (req, res) => {
   } catch (err) {
     console.error("[PATREON-LINK] ERROR:", err);
     return res.status(500).json({ ok: false, error: "Link failed." });
+  }
+});
+
+// -----------------------------------
+// Presence: latest camera frame
+// -----------------------------------
+app.post("/presence/frame", async (req, res) => {
+  try {
+    const { userId, deviceId, imageBase64, timestamp } = req.body || {};
+    if (!userId || !imageBase64) {
+      return res.status(400).json({ ok: false, error: "Missing userId or imageBase64" });
+    }
+    presenceContext[userId] = {
+      ...presenceContext[userId],
+      latestFrame: imageBase64,
+      latestFrameTimestamp: timestamp,
+      deviceId,
+    };
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("[presence/frame] ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Failed to store frame" });
+  }
+});
+
+// -----------------------------------
+// Presence: transcribe an audio chunk via OpenAI
+// -----------------------------------
+app.post("/presence/transcribe", async (req, res) => {
+  try {
+    const { userId, deviceId, audioBase64, mimeType } = req.body || {};
+    if (!userId || !audioBase64) {
+      return res.status(400).json({ error: "Missing userId or audioBase64" });
+    }
+
+    const audioBuffer = Buffer.from(audioBase64, "base64");
+    const audioBlob = new Blob([audioBuffer], { type: mimeType || "audio/webm" });
+
+    const form = new FormData();
+    form.append("file", audioBlob, "audio.webm");
+    form.append("model", "gpt-4o-mini-transcribe");
+
+    const openaiResp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` },
+      body: form,
+    });
+
+    if (!openaiResp.ok) {
+      const errText = await openaiResp.text();
+      console.error("[presence/transcribe] OpenAI error:", openaiResp.status, errText);
+      return res.status(502).json({ error: "Transcription failed" });
+    }
+
+    const transcript = await openaiResp.json();
+
+    presenceContext[userId] = {
+      ...presenceContext[userId],
+      latestTranscript: transcript.text,
+      deviceId,
+    };
+
+    console.log(`[presence] ${userId}: ${transcript.text}`);
+
+    return res.json({ transcript: transcript.text });
+  } catch (err) {
+    console.error("[presence/transcribe] ERROR:", err);
+    return res.status(500).json({ error: "Transcription failed" });
   }
 });
 
