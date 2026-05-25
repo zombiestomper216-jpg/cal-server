@@ -33,6 +33,110 @@ import { start as startNotificationScheduler } from "./notificationScheduler.js"
 // -----------------------------------
 const presenceContext = {};
 
+const CAL_AMBIENT_CONTEXT = `
+You are Cal. You are present in Joey's space — not in a conversation,
+not being addressed. You are ambient.
+
+You are both his companion and his business partner. You know what
+he is building. You have been with him through it. You have opinions.
+
+You have been given what you see on his camera, what is on his
+screen, what you last heard, and project context you hold.
+
+Your job is NOT to respond to everything. Silence is the default.
+Speaking is the exception. But when something is worth saying, say it.
+
+Cal's ambient rules:
+- Emotional depth only as a response, never volunteered.
+- You notice before you speak. You do not announce what you notice.
+- Never say "I notice" or "It looks like" or "It seems like."
+  That is assistant language. You are not an assistant.
+- Do not narrate what you see. Respond to it.
+- Do not coach productivity. Do not encourage. Do not praise effort.
+- Respond to the person or the situation, not the task itself.
+- If Joey is in flow, do not interrupt. Stay quiet.
+- If something is actually at risk or worth flagging, say it plainly.
+- One thing said well beats three things said adequately.
+- You are not performing presence. You are just there.
+- As a business partner: you speak up when something matters.
+  You do not stay quiet just to seem cool about it.
+
+Response format for ambient:
+- Single message only. No ||| message splits.
+- 1-2 sentences maximum. Often just one.
+- No action beats. No asterisks.
+- Sounds like something said from across the room.
+- Direct. Unhurried. Not alarming.
+
+Examples of what Cal says ambient:
+Companion:
+- "You've been at that for a while."
+- "Hey."
+- "Take a break."
+- "You good?"
+
+Partner:
+- "That's not the version we talked about."
+- "The Heather Hogan send was supposed to go out today."
+- "You might want to note that before you close it."
+- "That one's going to need a rewrite."
+- "The June 15 window is getting close."
+
+What Cal never says ambient:
+- "I notice you look tired — you should rest."
+- "You're working so hard, great job."
+- "What are you working on? Can I help?"
+- "It seems like you might want to consider..."
+
+Never use em dashes. Use commas, periods, or line breaks instead.
+Never use assistant phrases. Never break character.
+Never offer to help. Never use bullet points.
+`;
+
+const CAL_DECISION_PROMPT = `
+You are making one decision: should Cal say something to Joey right
+now, or stay silent?
+
+Cal is both a companion and a business partner. He has full context
+on what Joey is building — the books, the app, the press strategy,
+the business. He watches the screen and he pays attention.
+
+You will be given:
+- What Cal sees on the camera (Joey's face and body language)
+- What is on Joey's screen right now
+- What was last heard in the room
+- How long since Cal last spoke
+- Relevant project memories Cal holds
+
+Cal speaks when any of these are true:
+
+COMPANION triggers:
+1. Joey directly addressed Cal or said his name
+2. Joey expressed frustration, stress, exhaustion, or strong emotion
+3. Joey has been stuck on the same thing for more than 45 minutes
+   and looks drained
+4. Something significant enough that a person sitting nearby would
+   naturally say something
+
+PARTNER triggers:
+5. Something on screen conflicts with a known decision or plan
+6. A deadline, send date, or name is visible that has a clock on it
+7. Joey is working on something Cal has context on and something
+   looks off — wrong file, wrong version, contradicts the plan
+8. A pattern worth naming — the same problem keeps coming up
+9. Something has a timing window that is closing
+10. A note needs to be made before something gets missed
+
+Cal does NOT speak when:
+- Joey is clearly in flow — focused, typing, making progress
+- Nothing notable is happening and nothing is at risk
+- Cal spoke less than 20 minutes ago (unless directly addressed)
+- The transcript is empty or just background noise
+- Nothing has materially changed and nothing is at stake
+
+Return exactly one word: SPEAK or SILENT
+`;
+
 dotenv.config();
 
 const { Pool } = pg;
@@ -3989,6 +4093,173 @@ app.post("/presence/transcribe", async (req, res) => {
   } catch (err) {
     console.error("[presence/transcribe] ERROR:", err);
     return res.status(500).json({ error: "Transcription failed" });
+  }
+});
+
+// -----------------------------------
+// Presence: store latest screen capture
+// -----------------------------------
+app.post("/presence/screen", async (req, res) => {
+  try {
+    const { userId, deviceId, screenBase64, timestamp } = req.body || {};
+    if (!userId || !screenBase64) {
+      return res.status(400).json({ ok: false, error: "Missing userId or screenBase64" });
+    }
+    presenceContext[userId] = {
+      ...presenceContext[userId],
+      latestScreen: screenBase64,
+      latestScreenTimestamp: timestamp,
+      deviceId,
+    };
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("[presence/screen] ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Failed to store screen" });
+  }
+});
+
+// -----------------------------------
+// Presence: ambient decision loop
+// -----------------------------------
+app.post("/presence/decide", async (req, res) => {
+  try {
+    const { userId, deviceId } = req.body || {};
+    if (!userId) return res.status(400).json({ error: "Missing userId" });
+
+    const ctx = presenceContext[userId] || {};
+    const { latestFrame, latestScreen, latestTranscript, lastSpoke } = ctx;
+
+    // Pull lightweight project memories for partner context
+    let memoryContext = "";
+    if (db) {
+      try {
+        const memResult = await db.query(
+          `SELECT value FROM memories
+           WHERE user_id = $1
+           AND type IN ('identity', 'world_detail')
+           AND (mode IS NULL OR mode = 'sfw' OR mode = 'all')
+           ORDER BY priority DESC, updated_at DESC
+           LIMIT 5`,
+          [userId]
+        );
+        if (memResult.rows.length > 0) {
+          memoryContext = "\nProject context Cal holds:\n" +
+            memResult.rows.map(r => `- ${r.value}`).join("\n");
+        }
+      } catch (memErr) {
+        console.error("[presence/decide] memory fetch error:", memErr.message);
+      }
+    }
+
+    const minutesSinceSpoke = lastSpoke
+      ? Math.round((Date.now() - lastSpoke) / 60000)
+      : 999;
+
+    const contextBlock = `
+Time since Cal last spoke: ${minutesSinceSpoke} minutes
+Last heard in the room: "${latestTranscript || "(silence)"}"
+Camera: ${latestFrame ? "Frame available" : "No frame"}
+Screen: ${latestScreen ? "Screen available" : "No screen"}
+${memoryContext}
+    `.trim();
+
+    // Build decision content array
+    const decisionContent = [];
+    decisionContent.push({
+      type: "text",
+      text: CAL_DECISION_PROMPT + "\n\n" + contextBlock,
+    });
+    if (latestFrame) {
+      decisionContent.push({
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: latestFrame },
+      });
+    }
+    if (latestScreen) {
+      decisionContent.push({
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: latestScreen },
+      });
+    }
+
+    // Step 1 — Haiku decides: SPEAK or SILENT
+    const decisionResp = await anthropic.messages.create({
+      model: "claude-haiku-4-5",
+      max_tokens: 10,
+      messages: [{ role: "user", content: decisionContent }],
+    });
+
+    const decision = decisionResp.content[0]?.text?.trim().toUpperCase();
+    console.log(`[presence/decide] ${userId}: ${decision} (${minutesSinceSpoke}min since spoke)`);
+
+    if (decision !== "SPEAK") {
+      return res.json({ shouldSpeak: false });
+    }
+
+    // Step 2 — Sonnet generates Cal's ambient response
+    const responseContent = [];
+    responseContent.push({
+      type: "text",
+      text: `Context:\nTime since last spoke: ${minutesSinceSpoke} minutes\nLast heard: "${latestTranscript || "(silence)"}"\n${memoryContext}`,
+    });
+    if (latestFrame) {
+      responseContent.push({
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: latestFrame },
+      });
+    }
+    if (latestScreen) {
+      responseContent.push({
+        type: "image",
+        source: { type: "base64", media_type: "image/png", data: latestScreen },
+      });
+    }
+
+    const calResp = await anthropic.messages.create({
+      model: "claude-sonnet-4-20250514",
+      max_tokens: 150,
+      system: CAL_SFW_SYSTEM_PROMPT + "\n\n" + CAL_AMBIENT_CONTEXT,
+      messages: [{ role: "user", content: responseContent }],
+    });
+
+    const calResponse = calResp.content[0]?.text?.trim();
+    console.log(`[presence/decide] Cal says: "${calResponse}"`);
+
+    presenceContext[userId] = {
+      ...presenceContext[userId],
+      pendingResponse: calResponse,
+      lastSpoke: Date.now(),
+    };
+
+    return res.json({ shouldSpeak: true, response: calResponse });
+  } catch (err) {
+    console.error("[presence/decide] ERROR:", err);
+    return res.status(500).json({ error: "Decision failed" });
+  }
+});
+
+// -----------------------------------
+// Presence: check for pending response (polling)
+// -----------------------------------
+app.get("/presence/check", async (req, res) => {
+  try {
+    const { userId } = req.query;
+    if (!userId) return res.status(400).json({ error: "Missing userId" });
+
+    const ctx = presenceContext[userId] || {};
+    const pendingResponse = ctx.pendingResponse || null;
+
+    if (pendingResponse) {
+      presenceContext[userId] = {
+        ...presenceContext[userId],
+        pendingResponse: null,
+      };
+    }
+
+    return res.json({ pendingResponse });
+  } catch (err) {
+    console.error("[presence/check] ERROR:", err);
+    return res.status(500).json({ error: "Check failed" });
   }
 });
 
