@@ -4216,12 +4216,19 @@ ${memoryContext}
       });
     }
 
-    const calResp = await anthropic.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 150,
-      system: CAL_SFW_SYSTEM_PROMPT + "\n\n" + CAL_AMBIENT_CONTEXT,
-      messages: [{ role: "user", content: responseContent }],
-    });
+    console.log('[presence/decide] calling Sonnet for response...');
+    let calResp;
+    try {
+      calResp = await anthropic.messages.create({
+        model: "claude-sonnet-4-20250514",
+        max_tokens: 150,
+        system: CAL_SFW_SYSTEM_PROMPT + "\n\n" + CAL_AMBIENT_CONTEXT,
+        messages: [{ role: "user", content: responseContent }],
+      });
+    } catch (err) {
+      console.error('[presence/decide] Sonnet error:', err.message);
+      return res.status(500).json({ error: "Sonnet generation failed" });
+    }
 
     const calResponse = calResp.content[0]?.text?.trim();
     console.log(`[presence/decide] Cal says: "${calResponse}"`);
