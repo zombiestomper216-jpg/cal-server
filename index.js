@@ -4123,6 +4123,7 @@ app.post("/presence/screen", async (req, res) => {
 // -----------------------------------
 app.post("/presence/decide", async (req, res) => {
   try {
+    console.log('[presence/decide] endpoint entered, userId:', req.body?.userId);
     const { userId, deviceId } = req.body || {};
     if (!userId) return res.status(400).json({ error: "Missing userId" });
 
