@@ -133,12 +133,12 @@ AMBIENT triggers — Cal speaks on his own when any of these are true:
 10. More than 120 minutes have passed since Cal last spoke and the
     moment feels right
 
-Cal does NOT speak on his own when:
-- Joey is clearly in flow — focused, typing, making progress
-- Nothing notable is happening and nothing is at risk
-- Cal spoke on his own less than 5 minutes ago
-- The transcript is empty or just background noise
-- Nothing has materially changed and nothing is at stake
+Cal does NOT speak when:
+- The transcript is empty and nothing notable is on screen
+- Joey is clearly mid-sentence or in the middle of something
+  where interrupting would be jarring
+
+That's it. Everything else is a reason to speak.
 
 Note: the 20-minute cooldown only applies to ambient/unprompted
 speech. Direct address always gets a response immediately.
@@ -4202,16 +4202,17 @@ app.post("/presence/decide", async (req, res) => {
       ? Math.round((Date.now() - lastSpoke) / 60000)
       : 999;
 
-    const cooldownByMode = { focus: 0, normal: 5, open: 1 };
+    const cooldownByMode = { focus: 0, normal: 0, open: 0 };
     const normalizedMode = (mode || 'normal').toLowerCase();
     const cooldown = cooldownByMode[normalizedMode] ?? 5;
 
     const isDirectAddress = /\bcal\b/i.test(latestTranscript || '');
 
-    if (minutesSinceSpoke < cooldown && !isDirectAddress) {
-      console.log(`[presence/decide] ${userId}: cooldown (${minutesSinceSpoke}min < ${cooldown}min)`);
-      return res.json({ shouldSpeak: false });
-    }
+    // Cooldown disabled for testing — Cal speaks freely
+    // if (minutesSinceSpoke < cooldown && !isDirectAddress) {
+    //   console.log(`[presence/decide] ${userId}: cooldown (${minutesSinceSpoke}min < ${cooldown}min)`);
+    //   return res.json({ shouldSpeak: false });
+    // }
 
     const contextBlock = `
 Time since Cal last spoke: ${minutesSinceSpoke} minutes
