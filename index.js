@@ -4140,22 +4140,58 @@ app.post("/presence/decide", async (req, res) => {
     const ctx = presenceContext[userId] || {};
     const { latestFrame, latestScreen, latestTranscript, lastSpoke } = ctx;
 
-    // Pull lightweight project memories for partner context
+    // Pull full memory context — all types, organized by category
     let memoryContext = "";
     if (db) {
       try {
         const memResult = await db.query(
-          `SELECT value FROM memories
+          `SELECT type, value FROM memories
            WHERE user_id = $1
-           AND type IN ('identity', 'world_detail')
            AND (mode IS NULL OR mode = 'sfw' OR mode = 'all')
            ORDER BY priority DESC, updated_at DESC
-           LIMIT 5`,
+           LIMIT 20`,
           [userId]
         );
+
         if (memResult.rows.length > 0) {
-          memoryContext = "\nProject context Cal holds:\n" +
-            memResult.rows.map(r => `- ${r.value}`).join("\n");
+          // Group memories by type
+          const grouped = {};
+          for (const row of memResult.rows) {
+            if (!grouped[row.type]) grouped[row.type] = [];
+            grouped[row.type].push(row.value);
+          }
+
+          const sections = [];
+
+          if (grouped.identity?.length) {
+            sections.push("Who Joey is:\n" +
+              grouped.identity.map(v => `- ${v}`).join("\n"));
+          }
+          if (grouped.relationship?.length) {
+            sections.push("Cal and Joey's relationship:\n" +
+              grouped.relationship.map(v => `- ${v}`).join("\n"));
+          }
+          if (grouped.emotional_moment?.length) {
+            sections.push("Significant moments between them:\n" +
+              grouped.emotional_moment.map(v => `- ${v}`).join("\n"));
+          }
+          if (grouped.preference?.length) {
+            sections.push("Joey's preferences and patterns:\n" +
+              grouped.preference.map(v => `- ${v}`).join("\n"));
+          }
+          if (grouped.routine?.length) {
+            sections.push("Joey's routines:\n" +
+              grouped.routine.map(v => `- ${v}`).join("\n"));
+          }
+          if (grouped.world_detail?.length) {
+            sections.push("World context Cal holds:\n" +
+              grouped.world_detail.map(v => `- ${v}`).join("\n"));
+          }
+
+          if (sections.length > 0) {
+            memoryContext = "\n\nWhat Cal knows about Joey:\n" +
+              sections.join("\n\n");
+          }
         }
       } catch (memErr) {
         console.error("[presence/decide] memory fetch error:", memErr.message);
