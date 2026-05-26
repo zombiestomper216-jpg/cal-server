@@ -4166,6 +4166,17 @@ app.post("/presence/decide", async (req, res) => {
       ? Math.round((Date.now() - lastSpoke) / 60000)
       : 999;
 
+    const cooldownByMode = { focus: 0, normal: 20, open: 5 };
+    const normalizedMode = (mode || 'normal').toLowerCase();
+    const cooldown = cooldownByMode[normalizedMode] ?? 20;
+
+    const isDirectAddress = /\bcal\b/i.test(latestTranscript || '');
+
+    if (minutesSinceSpoke < cooldown && !isDirectAddress) {
+      console.log(`[presence/decide] ${userId}: cooldown (${minutesSinceSpoke}min < ${cooldown}min)`);
+      return res.json({ shouldSpeak: false });
+    }
+
     const contextBlock = `
 Time since Cal last spoke: ${minutesSinceSpoke} minutes
 Last heard in the room: "${latestTranscript || "(silence)"}"
@@ -4174,9 +4185,9 @@ Screen: ${latestScreen ? "Screen available" : "No screen"}
 ${memoryContext}
     `.trim();
 
-    const modeInstruction = mode === 'focus'
+    const modeInstruction = normalizedMode === 'focus'
       ? `\nMODE: FOCUS. Cal is in focus mode. Only return SPEAK if Joey directly addressed Cal by name or asked Cal a direct question. All ambient triggers are disabled. Cooldown does not apply to direct address.`
-      : mode === 'open'
+      : normalizedMode === 'open'
       ? `\nMODE: OPEN. Cal is in open mode. The ambient cooldown is 5 minutes instead of 20. Cal may speak more freely when something is worth saying. Direct address always triggers.`
       : `\nMODE: NORMAL. Standard behavior applies.`;
 
