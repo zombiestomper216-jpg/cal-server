@@ -4204,7 +4204,7 @@ app.post("/presence/decide", async (req, res) => {
 
     const cooldownByMode = { focus: 0, normal: 5, open: 1 };
     const normalizedMode = (mode || 'normal').toLowerCase();
-    const cooldown = cooldownByMode[normalizedMode] ?? 20;
+    const cooldown = cooldownByMode[normalizedMode] ?? 5;
 
     const isDirectAddress = /\bcal\b/i.test(latestTranscript || '');
 
