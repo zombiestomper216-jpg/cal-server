@@ -4134,7 +4134,7 @@ app.post("/presence/screen", async (req, res) => {
 app.post("/presence/decide", async (req, res) => {
   try {
     console.log('[presence/decide] endpoint entered, userId:', req.body?.userId);
-    const { userId, deviceId } = req.body || {};
+    const { userId, deviceId, mode } = req.body || {};
     if (!userId) return res.status(400).json({ error: "Missing userId" });
 
     const ctx = presenceContext[userId] || {};
@@ -4174,11 +4174,17 @@ Screen: ${latestScreen ? "Screen available" : "No screen"}
 ${memoryContext}
     `.trim();
 
+    const modeInstruction = mode === 'focus'
+      ? `\nMODE: FOCUS. Cal is in focus mode. Only return SPEAK if Joey directly addressed Cal by name or asked Cal a direct question. All ambient triggers are disabled. Cooldown does not apply to direct address.`
+      : mode === 'open'
+      ? `\nMODE: OPEN. Cal is in open mode. The ambient cooldown is 5 minutes instead of 20. Cal may speak more freely when something is worth saying. Direct address always triggers.`
+      : `\nMODE: NORMAL. Standard behavior applies.`;
+
     // Build decision content array
     const decisionContent = [];
     decisionContent.push({
       type: "text",
-      text: CAL_DECISION_PROMPT + "\n\n" + contextBlock,
+      text: CAL_DECISION_PROMPT + "\n\n" + contextBlock + modeInstruction,
     });
     if (latestFrame) {
       decisionContent.push({
@@ -4320,6 +4326,19 @@ app.get("/presence/check", async (req, res) => {
     console.error("[presence/check] ERROR:", err);
     return res.status(500).json({ error: "Check failed" });
   }
+});
+
+// -----------------------------------
+// Presence: available modes (for UI)
+// -----------------------------------
+app.get("/presence/modes", (req, res) => {
+  return res.json({
+    modes: [
+      { id: 'focus', label: 'Focus', description: 'Direct address only' },
+      { id: 'normal', label: 'Normal', description: 'Standard behavior' },
+      { id: 'open', label: 'Open', description: 'More conversation' },
+    ]
+  });
 });
 
 // -----------------------------------
