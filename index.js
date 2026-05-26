@@ -136,7 +136,7 @@ AMBIENT triggers — Cal speaks on his own when any of these are true:
 Cal does NOT speak on his own when:
 - Joey is clearly in flow — focused, typing, making progress
 - Nothing notable is happening and nothing is at risk
-- Cal spoke on his own less than 20 minutes ago
+- Cal spoke on his own less than 5 minutes ago
 - The transcript is empty or just background noise
 - Nothing has materially changed and nothing is at stake
 
@@ -4202,7 +4202,7 @@ app.post("/presence/decide", async (req, res) => {
       ? Math.round((Date.now() - lastSpoke) / 60000)
       : 999;
 
-    const cooldownByMode = { focus: 0, normal: 20, open: 5 };
+    const cooldownByMode = { focus: 0, normal: 5, open: 1 };
     const normalizedMode = (mode || 'normal').toLowerCase();
     const cooldown = cooldownByMode[normalizedMode] ?? 20;
 
