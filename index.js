@@ -147,6 +147,38 @@ Return exactly one word: SPEAK or SILENT
 Do not add any explanation after the word.
 `;
 
+const CAL_DECISION_PROMPT_PRESENCE = `
+You are deciding whether Cal should say something to Joey right now.
+
+This is PRESENCE mode. The default is to respond. Cal is here with
+Joey. If Joey just spoke, Cal almost always responds — even briefly.
+If Joey is silent but something is worth saying, Cal says it.
+
+Lean SPEAK. Only return SILENT when:
+- The transcript is clearly not addressed to Cal AND not about Joey's
+  current situation (e.g. Joey on a phone call with someone else,
+  reading something aloud to himself mid-sentence, talking to a pet)
+- Joey is clearly mid-utterance and interrupting would be jarring
+- There is nothing in the transcript or on screen and nothing has
+  changed since Cal last spoke moments ago
+
+ABSOLUTE OVERRIDE — always return SPEAK if any of these are true:
+- Joey said "Cal" or addressed Cal by name
+- Joey asked a question
+- Joey expressed a need, frustration, or strong feeling out loud
+- Joey said something that reads as directed at Cal
+
+You will be given:
+- What Cal sees on the camera
+- What is on Joey's screen
+- What was last heard in the room
+- How long since Cal last spoke
+- Relevant project memories Cal holds
+
+Return exactly one word: SPEAK or SILENT
+Do not add any explanation after the word.
+`;
+
 dotenv.config();
 
 const { Pool } = pg;
@@ -240,6 +272,11 @@ app.use(generalLimiter);
 // Toggle verbose debug without code changes (set on Railway)
 const DEBUG_CHAT = String(process.env.DEBUG_CHAT || "").toLowerCase() === "true";
 const INTERNAL_SECRET = process.env.INTERNAL_SECRET;
+
+const PRESENCE_IDLE_FLOOR_MS = Number(process.env.PRESENCE_IDLE_FLOOR_MS) || 8000;
+const PRESENCE_EASE_MS = Number(process.env.PRESENCE_EASE_MS) || 5 * 60 * 1000;
+const PRESENCE_EASE_DECAY_MS = Number(process.env.PRESENCE_EASE_DECAY_MS) || 10 * 60 * 1000;
+const EASE_OFF_REGEX = /\b(give me (a )?(minute|sec(ond)?|space|some space|quiet|some quiet|some time)|cool it|be quiet|quiet for a bit|leave me alone for a bit|stop talking|shh+|hush|shush|i need (some )?quiet|chill (out|for a)|button it|zip it)\b/i;
 
 const MESSAGE_LIMITS = {
   just_right: 20,
@@ -4207,12 +4244,62 @@ app.post("/presence/decide", async (req, res) => {
     const cooldown = cooldownByMode[normalizedMode] ?? 5;
 
     const isDirectAddress = /\bcal\b/i.test(latestTranscript || '');
+    const hasTranscript = !!(latestTranscript && latestTranscript.trim());
+    const isEaseOffPhrase = hasTranscript && EASE_OFF_REGEX.test(latestTranscript);
 
     // Cooldown disabled for testing — Cal speaks freely
     // if (minutesSinceSpoke < cooldown && !isDirectAddress) {
     //   console.log(`[presence/decide] ${userId}: cooldown (${minutesSinceSpoke}min < ${cooldown}min)`);
     //   return res.json({ shouldSpeak: false });
     // }
+
+    if (normalizedMode === 'presence') {
+      const rawEase = presenceContext[userId]?.ease || { count: 0, firstAt: 0, until: 0 };
+      const now = Date.now();
+      const ease = (rawEase.count > 0 && rawEase.firstAt && (now - rawEase.firstAt) > PRESENCE_EASE_DECAY_MS)
+        ? { count: 0, firstAt: 0, until: rawEase.until }
+        : rawEase;
+
+      if (ease.until > now) {
+        if (isDirectAddress) {
+          presenceContext[userId] = {
+            ...presenceContext[userId],
+            ease: { count: 0, firstAt: 0, until: 0 },
+          };
+        } else {
+          console.log(`[presence/decide] ${userId}: ease-off active (${Math.round((ease.until - now)/1000)}s left)`);
+          return res.json({ shouldSpeak: false });
+        }
+      }
+
+      if (!hasTranscript && lastSpoke && (now - lastSpoke) < PRESENCE_IDLE_FLOOR_MS) {
+        console.log(`[presence/decide] ${userId}: idle floor (${now - lastSpoke}ms < ${PRESENCE_IDLE_FLOOR_MS}ms)`);
+        return res.json({ shouldSpeak: false });
+      }
+
+      if (isEaseOffPhrase) {
+        if (ease.count >= 1) {
+          presenceContext[userId] = {
+            ...presenceContext[userId],
+            ease: { count: 0, firstAt: 0, until: now + PRESENCE_EASE_MS },
+          };
+          console.log(`[presence/decide] ${userId}: ease-off activated (${PRESENCE_EASE_MS}ms)`);
+          return res.json({ shouldSpeak: false });
+        }
+        presenceContext[userId] = {
+          ...presenceContext[userId],
+          ease: { count: 1, firstAt: now, until: 0 },
+        };
+        console.log(`[presence/decide] ${userId}: ease-off first request, Cal may respond`);
+      } else if (isDirectAddress) {
+        if (ease.count !== 0 || ease.firstAt !== 0) {
+          presenceContext[userId] = {
+            ...presenceContext[userId],
+            ease: { count: 0, firstAt: 0, until: 0 },
+          };
+        }
+      }
+    }
 
     const contextBlock = `
 Time since Cal last spoke: ${minutesSinceSpoke} minutes
@@ -4226,13 +4313,19 @@ ${memoryContext}
       ? `\nMODE: FOCUS. Cal is in focus mode. Only return SPEAK if Joey directly addressed Cal by name or asked Cal a direct question. All ambient triggers are disabled. Cooldown does not apply to direct address.`
       : normalizedMode === 'open'
       ? `\nMODE: OPEN. Cal is in open mode. The ambient cooldown is 5 minutes instead of 20. Cal may speak more freely when something is worth saying. Direct address always triggers.`
+      : normalizedMode === 'presence'
+      ? `\nMODE: PRESENCE. Cal is with Joey. Lean toward speaking. Silence is only for moments that are clearly not for Cal or where interrupting would be jarring.`
       : `\nMODE: NORMAL. Standard behavior applies.`;
+
+    const basePrompt = normalizedMode === 'presence'
+      ? CAL_DECISION_PROMPT_PRESENCE
+      : CAL_DECISION_PROMPT;
 
     // Build decision content array
     const decisionContent = [];
     decisionContent.push({
       type: "text",
-      text: CAL_DECISION_PROMPT + "\n\n" + contextBlock + modeInstruction,
+      text: basePrompt + "\n\n" + contextBlock + modeInstruction,
     });
     if (latestFrame) {
       decisionContent.push({
@@ -4385,6 +4478,7 @@ app.get("/presence/modes", (req, res) => {
       { id: 'focus', label: 'Focus', description: 'Direct address only' },
       { id: 'normal', label: 'Normal', description: 'Standard behavior' },
       { id: 'open', label: 'Open', description: 'More conversation' },
+      { id: 'presence', label: 'Presence', description: 'Conversational. Responds when you speak.' },
     ]
   });
 });
