@@ -4421,14 +4421,19 @@ ${memoryContext}
         source: { type: "base64", media_type: "image/png", data: latestFrame },
       });
     }
-    if (latestScreen) {
+    const includeScreen = latestScreen && !(normalizedMode === 'presence' && hasTranscript);
+    if (includeScreen) {
       responseContent.push({
         type: "image",
         source: { type: "base64", media_type: "image/png", data: latestScreen },
       });
     }
 
-    console.log('[presence/decide] calling Sonnet for response...');
+    const priorTurns = (normalizedMode === 'presence' && Array.isArray(presenceContext[userId]?.history))
+      ? presenceContext[userId].history.map(t => ({ role: t.role, content: t.content }))
+      : [];
+
+    console.log('[presence/decide] calling Sonnet for response...', 'priorTurns:', priorTurns.length, 'includeScreen:', !!includeScreen);
     let calResp;
     try {
       calResp = await anthropic.messages.create({
@@ -4437,7 +4442,7 @@ ${memoryContext}
         system: normalizedMode === 'presence'
           ? CAL_SFW_SYSTEM_PROMPT + "\n\n" + CAL_AMBIENT_CONTEXT + "\n\n" + CAL_PRESENCE_VOICE_GUARD
           : CAL_SFW_SYSTEM_PROMPT + "\n\n" + CAL_AMBIENT_CONTEXT,
-        messages: [{ role: "user", content: responseContent }],
+        messages: [...priorTurns, { role: "user", content: responseContent }],
       });
     } catch (err) {
       console.error('[presence/decide] Sonnet error:', err.message);
@@ -4446,6 +4451,21 @@ ${memoryContext}
 
     const calResponse = calResp.content[0]?.text?.trim();
     console.log(`[presence/decide] Cal says: "${calResponse}"`);
+
+    if (normalizedMode === 'presence' && calResponse) {
+      const prevHistory = Array.isArray(presenceContext[userId]?.history)
+        ? presenceContext[userId].history
+        : [];
+      const newHistory = [
+        ...prevHistory,
+        { role: 'user', content: latestTranscript?.trim() || '(silence)' },
+        { role: 'assistant', content: calResponse },
+      ].slice(-10);
+      presenceContext[userId] = {
+        ...presenceContext[userId],
+        history: newHistory,
+      };
+    }
 
     let pendingAudio = null;
     try {
