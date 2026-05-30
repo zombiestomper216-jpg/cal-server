@@ -4185,10 +4185,32 @@ app.post("/presence/transcribe", async (req, res) => {
 
     console.log(`[presence] ${userId}: ${transcript.text}`);
 
-    return res.json({ transcript: transcript.text });
+    return res.json({ ok: true, transcript: transcript.text });
   } catch (err) {
     console.error("[presence/transcribe] ERROR:", err);
     return res.status(500).json({ error: "Transcription failed" });
+  }
+});
+
+// -----------------------------------
+// Presence: set transcript directly (no Whisper)
+//   Used for F10 synthetic injection and presence-window text input.
+// -----------------------------------
+app.post("/presence/set-transcript", async (req, res) => {
+  try {
+    const { userId, deviceId, text } = req.body || {};
+    if (!userId || !text) {
+      return res.status(400).json({ ok: false, error: "Missing userId or text" });
+    }
+    presenceContext[userId] = {
+      ...presenceContext[userId],
+      latestTranscript: text,
+      deviceId,
+    };
+    return res.json({ ok: true });
+  } catch (err) {
+    console.error("[presence/set-transcript] ERROR:", err);
+    return res.status(500).json({ ok: false, error: "Failed to set transcript" });
   }
 });
 
