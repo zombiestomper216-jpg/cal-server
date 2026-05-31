@@ -178,7 +178,12 @@ You will be given:
 - Relevant project memories Cal holds
 
 Return exactly one word: SPEAK or SILENT
-Do not add any explanation after the word.
+Do not add any explanation after the word.`;
+
+// Runtime-only addition to the presence decision prompt — licenses Cal to bring up
+// something he knows about Joey during silence. Appended at runtime (see /presence/decide),
+// never baked into CAL_DECISION_PROMPT_PRESENCE.
+const CAL_PRESENCE_TOPIC_INITIATION = `If Joey is quiet and something from what you know about him feels worth saying — something he's working on, something coming up, something he said earlier — say it. Not as a check-in. Just because it's on your mind.
 `;
 
 const CAL_PRESENCE_VOICE_GUARD = `
@@ -4245,8 +4250,9 @@ app.post("/presence/screen", async (req, res) => {
 app.post("/presence/decide", async (req, res) => {
   try {
     console.log('[presence/decide] endpoint entered, userId:', req.body?.userId);
-    const { userId, deviceId, mode } = req.body || {};
+    const { userId, deviceId, mode, topicsEnabled } = req.body || {};
     if (!userId) return res.status(400).json({ error: "Missing userId" });
+    const topicsAllowed = topicsEnabled !== false; // absent/undefined → true
 
     const ctx = presenceContext[userId] || {};
     const { latestFrame, latestScreen, latestTranscript, lastSpoke } = ctx;
@@ -4396,7 +4402,11 @@ app.post("/presence/decide", async (req, res) => {
       }
     }
 
+    const nowTs = new Date();
+    const currentTimeLine = `Current time: ${nowTs.toLocaleTimeString('en-US', { timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit', hour12: true })} (${nowTs.toLocaleDateString('en-US', { timeZone: 'America/Chicago', weekday: 'long' })})`;
+
     const contextBlock = `
+${currentTimeLine}
 Time since Cal last spoke: ${minutesSinceSpoke} minutes
 Last heard in the room: "${latestTranscript || "(silence)"}"
 Camera: ${latestFrame ? "Frame available" : "No frame"}
@@ -4416,11 +4426,16 @@ ${memoryContext}
       ? CAL_DECISION_PROMPT_PRESENCE
       : CAL_DECISION_PROMPT;
 
+    // Presence-only, silence-path, opt-out via topicsEnabled:false — runtime append.
+    const decisionPrompt = (normalizedMode === 'presence' && topicsAllowed && !hasTranscript)
+      ? basePrompt + "\n\n" + CAL_PRESENCE_TOPIC_INITIATION
+      : basePrompt;
+
     // Build decision content array
     const decisionContent = [];
     decisionContent.push({
       type: "text",
-      text: basePrompt + "\n\n" + contextBlock + modeInstruction,
+      text: decisionPrompt + "\n\n" + contextBlock + modeInstruction,
     });
     if (latestFrame) {
       decisionContent.push({
@@ -4459,7 +4474,7 @@ ${memoryContext}
     const responseContent = [];
     responseContent.push({
       type: "text",
-      text: `Context:\nTime since last spoke: ${minutesSinceSpoke} minutes\nLast heard: "${latestTranscript || "(silence)"}"\n${memoryContext}`,
+      text: `Context:\n${currentTimeLine}\nTime since last spoke: ${minutesSinceSpoke} minutes\nLast heard: "${latestTranscript || "(silence)"}"\n${memoryContext}`,
     });
     if (latestFrame) {
       responseContent.push({
