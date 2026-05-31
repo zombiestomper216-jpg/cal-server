@@ -183,8 +183,7 @@ Do not add any explanation after the word.`;
 // Runtime-only addition to the presence decision prompt — licenses Cal to bring up
 // something he knows about Joey during silence. Appended at runtime (see /presence/decide),
 // never baked into CAL_DECISION_PROMPT_PRESENCE.
-const CAL_PRESENCE_TOPIC_INITIATION = `If Joey is quiet and something from what you know about him feels worth saying — something he's working on, something coming up, something he said earlier — say it. Not as a check-in. Just because it's on your mind.
-`;
+const CAL_PRESENCE_TOPIC_INITIATION = `If Joey is quiet and something from what you know about him feels worth saying — something he's working on, something coming up, something he said earlier — say it. Not as a check-in. Just because it's on your mind.`;
 
 const CAL_PRESENCE_VOICE_GUARD = `
 You are with Joey right now, in his room, through the camera and the mic.
