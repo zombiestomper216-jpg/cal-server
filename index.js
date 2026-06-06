@@ -899,9 +899,11 @@ async function saveMemoryEmbedding(userId, memoryKey, memoryValue) {
 async function getSemanticMemories(userId, queryText, allMemories, limit = 10) {
   try {
     const queryEmbedding = await generateVoyageEmbedding(queryText);
+
+    // Step 1 — nearest memory_keys from the embeddings DB (SUPABASE_DATABASE_URL),
+    // in similarity order.
     const result = await supabaseDb.query(`
-      SELECT memory_key,
-        1 - (embedding <=> $1::vector) AS similarity
+      SELECT memory_key
       FROM memory_embeddings
       WHERE user_id = $2
       ORDER BY embedding <=> $1::vector
@@ -910,11 +912,42 @@ async function getSemanticMemories(userId, queryText, allMemories, limit = 10) {
 
     if (!result.rows.length) return allMemories;
 
-    const topKeys = new Set(result.rows.map(r => r.memory_key));
+    const nearestKeys = result.rows.map(r => r.memory_key); // similarity order
+
+    // 4 always-on — kept exactly as before (from req.body, by type).
     const alwaysOn = allMemories.filter(m =>
       m.type === 'identity' || m.type === 'routine'
     ).slice(0, 4);
-    const semantic = allMemories.filter(m => topKeys.has(m.key)).slice(0, 7);
+
+    // Step 2 — resolve the nearest keys to memory text DIRECTLY from the memory DB
+    // (DATABASE_URL), server-side. This removes the dependency on req.body, which
+    // sends a subset that rarely contains the nearest-by-embedding keys.
+    let semantic;
+    try {
+      const memRows = await db.query(
+        `SELECT * FROM memories WHERE user_id = $1 AND key = ANY($2::text[])`,
+        [userId, nearestKeys]
+      );
+
+      // De-dupe by key (one user/key can have rows under multiple devices) and
+      // re-order by the step-1 similarity rank (SQL ANY() loses order).
+      const byKey = new Map();
+      for (const row of memRows.rows) {
+        if (!byKey.has(row.key)) byKey.set(row.key, row);
+      }
+      semantic = nearestKeys
+        .map(k => byKey.get(k))
+        .filter(Boolean)
+        .slice(0, 7);
+    } catch (dbErr) {
+      // FALLBACK: broken recall — req.body keys rarely overlap the nearest embeddings,
+      // so this yields ~0 semantic and degrades to the current broken 4-memory state.
+      // Better than crashing/returning empty, but NOT a working baseline. We warn so a
+      // memory-DB outage is visible instead of looking like a normal low-recall turn.
+      console.warn('[MEMORY] Semantic DB fetch failed — falling back to broken req.body recall (~0 semantic).', { userId, error: dbErr?.message });
+      const topKeys = new Set(nearestKeys);
+      semantic = allMemories.filter(m => topKeys.has(m.key)).slice(0, 7);
+    }
 
     const seen = new Set();
     const combined = [...alwaysOn, ...semantic].filter(m => {
