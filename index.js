@@ -797,14 +797,22 @@ basePrompt = CAL_SFW_SYSTEM_PROMPT;  }
     basePrompt += "\n\n" + INTIMACY_LAYER;
   }
 
+  // ---------------------------------------------------------------------------
+  // basePrompt above is the request-invariant prefix (character/canon/world/
+  // behavior, keyed only by mode/pace/founder). It is the prompt-cache prefix.
+  // Everything below changes per request and is kept in a separate string so it
+  // can be placed AFTER the cache breakpoint by the caller.
+  // ---------------------------------------------------------------------------
+  let dynamicPrompt = "";
+
   // Inject real-time context (time, date, Chicago weather)
   if (realtimeContext) {
-    basePrompt += `\n\n${realtimeContext}`;
+    dynamicPrompt += `\n\n${realtimeContext}`;
   }
 
   // Inject last session summary (before memories, never announced)
   if (lastSessionSummary) {
-    basePrompt += `\n\nLast session: ${lastSessionSummary}`;
+    dynamicPrompt += `\n\nLast session: ${lastSessionSummary}`;
   }
 
   // PHASE 4: Natural memory injection (limit to 50 max, prioritize recent)
@@ -844,10 +852,12 @@ basePrompt = CAL_SFW_SYSTEM_PROMPT;  }
     console.log('[MEMORY]', { count: limitedMemories.length, chars: memoryLines.length });
 
     // PHASE 4: Natural header instead of "REMEMBERED FACTS"
-    basePrompt += `\n\nThings you've learned about him over time:\n${memoryLines}`;
+    dynamicPrompt += `\n\nThings you've learned about him over time:\n${memoryLines}`;
   }
 
-  return basePrompt;
+  // staticPrompt is the cacheable prefix; dynamicPrompt is everything that varies
+  // per request. staticPrompt + dynamicPrompt reproduces the previous single string.
+  return { staticPrompt: basePrompt, dynamicPrompt };
 }
 
 async function generateVoyageEmbedding(text) {
@@ -2404,7 +2414,7 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       );
     }
 
-    const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext, founder: isFounder });
+    const { staticPrompt, dynamicPrompt } = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext, founder: isFounder });
 
 
     // Update last_referenced_at for injected memories (fire-and-forget)
@@ -2429,15 +2439,26 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
 
     const model = "claude-sonnet-4-6";
 
-    let fullSystemPrompt = systemPrompt;
-
-    // Identity / meta-awareness block
+    // Identity / meta-awareness block — per-user, so it lives in the dynamic
+    // (uncached) suffix, after the cache breakpoint.
+    let dynamicSuffix = dynamicPrompt;
     if (isMetaAware && req.userId === 3) {
-      fullSystemPrompt += '\n\n' + META_AWARE_BLOCK;
+      dynamicSuffix += '\n\n' + META_AWARE_BLOCK;
     } else if (isMetaAware) {
-      fullSystemPrompt += '\n\n' + NIKKI_AWARE_BLOCK;
+      dynamicSuffix += '\n\n' + NIKKI_AWARE_BLOCK;
     } else {
-      fullSystemPrompt += '\n\n' + IDENTITY_DEFLECTION_BLOCK;
+      dynamicSuffix += '\n\n' + IDENTITY_DEFLECTION_BLOCK;
+    }
+
+    // Prompt caching: the static character/canon/world/behavior prefix is the
+    // first block and carries the cache breakpoint; the per-request suffix
+    // (time-of-day, last-session summary, memories, identity block) follows it
+    // so the cached prefix stays byte-identical across turns.
+    const systemBlocks = [
+      { type: "text", text: staticPrompt, cache_control: { type: "ephemeral" } },
+    ];
+    if (dynamicSuffix.trim()) {
+      systemBlocks.push({ type: "text", text: dynamicSuffix });
     }
 
     // Cap history to last 40 messages before building conversation
@@ -2508,7 +2529,7 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
 
     const calResponse = await sendMessageToCal({
       mode,
-      systemPrompt: fullSystemPrompt,
+      systemPrompt: systemBlocks,
       conversationHistory,
     });
 
@@ -3232,12 +3253,15 @@ async function generateReEngagement(deviceId, userId, mode) {
 
   // 4. Build system prompt (always SLOW_BURN pace for re-engagement)
   const filteredMemories = buildMemoryContext(memories, mode, []);
-  const baseSystemPrompt = buildSystemPrompt({
+  const { staticPrompt, dynamicPrompt } = buildSystemPrompt({
     mode,
     pace: "SLOW_BURN",
     memories: filteredMemories,
     lastSessionSummary,
   });
+  // Re-engagement path uses a plain string; staticPrompt + dynamicPrompt
+  // reproduces the previous single-string output exactly.
+  const baseSystemPrompt = staticPrompt + dynamicPrompt;
 
   // 5. Tone-varying instruction based on unanswered count
   let reEngageInstruction;

@@ -9,7 +9,8 @@ const client = new Anthropic({
  *
  * @param {Object} params
  * @param {string} params.mode - "sfw" or "after_dark"
- * @param {string} params.systemPrompt - Fully assembled system prompt (built by index.js)
+ * @param {string|Array} params.systemPrompt - Fully assembled system prompt (built by index.js).
+ *   May be a plain string or an array of Anthropic content blocks (used for prompt caching).
  * @param {Array} params.conversationHistory - Array of {role, content} objects (includes latest user message)
  */
 export async function sendMessageToCal({
@@ -27,6 +28,8 @@ export async function sendMessageToCal({
   console.log('[TOKENS]', {
     input: response.usage.input_tokens,
     output: response.usage.output_tokens,
+    cache_creation: response.usage.cache_creation_input_tokens,
+    cache_read: response.usage.cache_read_input_tokens,
     total: response.usage.input_tokens + response.usage.output_tokens
   });
 
