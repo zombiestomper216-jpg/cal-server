@@ -26,7 +26,7 @@ import {
   META_AWARE_BLOCK,
   NIKKI_AWARE_BLOCK,
 } from "./prompts.js";
-import { sendMessageToCal, checkEasterEgg } from "./cal.js";
+import { sendMessageToCal, checkEasterEgg, CAL_CHAT_MODEL } from "./cal.js";
 import { generateCalMessage } from "./generateCalMessage.js";
 import { start as startNotificationScheduler } from "./notificationScheduler.js";
 
@@ -2437,7 +2437,7 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
           : 0.85
         : 0.7;
 
-    const model = "claude-sonnet-4-6";
+    const model = CAL_CHAT_MODEL;
 
     // Identity / meta-awareness block — per-user, so it lives in the dynamic
     // (uncached) suffix, after the cache breakpoint.

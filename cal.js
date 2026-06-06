@@ -4,6 +4,11 @@ const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+// Single source of truth for the /chat completion model. index.js imports this
+// for the chat_runs audit log so the recorded model can never drift from the one
+// actually sent to the API.
+export const CAL_CHAT_MODEL = "claude-sonnet-4-20250514";
+
 /**
  * Main Cal message handler
  *
@@ -19,7 +24,7 @@ export async function sendMessageToCal({
   conversationHistory = [],
 }) {
   const response = await client.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: CAL_CHAT_MODEL,
     max_tokens: 1000,
     system: systemPrompt,
     messages: conversationHistory,
