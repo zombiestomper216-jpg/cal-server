@@ -4,12 +4,18 @@ const client = new Anthropic({
   apiKey: process.env.ANTHROPIC_API_KEY,
 });
 
+// Single source of truth for the /chat completion model. index.js imports this
+// for the chat_runs audit log so the recorded model can never drift from the one
+// actually sent to the API.
+export const CAL_CHAT_MODEL = "claude-sonnet-4-20250514";
+
 /**
  * Main Cal message handler
  *
  * @param {Object} params
  * @param {string} params.mode - "sfw" or "after_dark"
- * @param {string} params.systemPrompt - Fully assembled system prompt (built by index.js)
+ * @param {string|Array} params.systemPrompt - Fully assembled system prompt (built by index.js).
+ *   May be a plain string or an array of Anthropic content blocks (used for prompt caching).
  * @param {Array} params.conversationHistory - Array of {role, content} objects (includes latest user message)
  */
 export async function sendMessageToCal({
@@ -18,7 +24,7 @@ export async function sendMessageToCal({
   conversationHistory = [],
 }) {
   const response = await client.messages.create({
-    model: "claude-sonnet-4-20250514",
+    model: CAL_CHAT_MODEL,
     max_tokens: 1000,
     system: systemPrompt,
     messages: conversationHistory,
@@ -27,6 +33,8 @@ export async function sendMessageToCal({
   console.log('[TOKENS]', {
     input: response.usage.input_tokens,
     output: response.usage.output_tokens,
+    cache_creation: response.usage.cache_creation_input_tokens,
+    cache_read: response.usage.cache_read_input_tokens,
     total: response.usage.input_tokens + response.usage.output_tokens
   });
 

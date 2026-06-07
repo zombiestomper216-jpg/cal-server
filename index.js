@@ -27,7 +27,7 @@ import {
   META_AWARE_BLOCK,
   NIKKI_AWARE_BLOCK,
 } from "./prompts.js";
-import { sendMessageToCal, checkEasterEgg } from "./cal.js";
+import { sendMessageToCal, checkEasterEgg, CAL_CHAT_MODEL } from "./cal.js";
 import { generateCalMessage } from "./generateCalMessage.js";
 import { start as startNotificationScheduler } from "./notificationScheduler.js";
 
@@ -803,14 +803,22 @@ basePrompt = CAL_SFW_SYSTEM_PROMPT;  }
     basePrompt += "\n\n" + INTIMACY_LAYER;
   }
 
+  // ---------------------------------------------------------------------------
+  // basePrompt above is the request-invariant prefix (character/canon/world/
+  // behavior, keyed only by mode/pace/founder). It is the prompt-cache prefix.
+  // Everything below changes per request and is kept in a separate string so it
+  // can be placed AFTER the cache breakpoint by the caller.
+  // ---------------------------------------------------------------------------
+  let dynamicPrompt = "";
+
   // Inject real-time context (time, date, Chicago weather)
   if (realtimeContext) {
-    basePrompt += `\n\n${realtimeContext}`;
+    dynamicPrompt += `\n\n${realtimeContext}`;
   }
 
   // Inject last session summary (before memories, never announced)
   if (lastSessionSummary) {
-    basePrompt += `\n\nLast session: ${lastSessionSummary}`;
+    dynamicPrompt += `\n\nLast session: ${lastSessionSummary}`;
   }
 
   // PHASE 4: Natural memory injection (limit to 50 max, prioritize recent)
@@ -850,10 +858,12 @@ basePrompt = CAL_SFW_SYSTEM_PROMPT;  }
     console.log('[MEMORY]', { count: limitedMemories.length, chars: memoryLines.length });
 
     // PHASE 4: Natural header instead of "REMEMBERED FACTS"
-    basePrompt += `\n\nThings you've learned about him over time:\n${memoryLines}`;
+    dynamicPrompt += `\n\nThings you've learned about him over time:\n${memoryLines}`;
   }
 
-  return basePrompt;
+  // staticPrompt is the cacheable prefix; dynamicPrompt is everything that varies
+  // per request. staticPrompt + dynamicPrompt reproduces the previous single string.
+  return { staticPrompt: basePrompt, dynamicPrompt };
 }
 
 async function generateVoyageEmbedding(text) {
@@ -895,9 +905,11 @@ async function saveMemoryEmbedding(userId, memoryKey, memoryValue) {
 export async function getSemanticMemories(userId, queryText, allMemories, limit = 10) {
   try {
     const queryEmbedding = await generateVoyageEmbedding(queryText);
+
+    // Step 1 — nearest memory_keys from the embeddings DB (SUPABASE_DATABASE_URL),
+    // in similarity order.
     const result = await supabaseDb.query(`
-      SELECT memory_key,
-        1 - (embedding <=> $1::vector) AS similarity
+      SELECT memory_key
       FROM memory_embeddings
       WHERE user_id = $2
       ORDER BY embedding <=> $1::vector
@@ -906,11 +918,42 @@ export async function getSemanticMemories(userId, queryText, allMemories, limit 
 
     if (!result.rows.length) return allMemories;
 
-    const topKeys = new Set(result.rows.map(r => r.memory_key));
+    const nearestKeys = result.rows.map(r => r.memory_key); // similarity order
+
+    // 4 always-on — kept exactly as before (from req.body, by type).
     const alwaysOn = allMemories.filter(m =>
       m.type === 'identity' || m.type === 'routine'
     ).slice(0, 4);
-    const semantic = allMemories.filter(m => topKeys.has(m.key)).slice(0, 7);
+
+    // Step 2 — resolve the nearest keys to memory text DIRECTLY from the memory DB
+    // (DATABASE_URL), server-side. This removes the dependency on req.body, which
+    // sends a subset that rarely contains the nearest-by-embedding keys.
+    let semantic;
+    try {
+      const memRows = await db.query(
+        `SELECT * FROM memories WHERE user_id = $1 AND key = ANY($2::text[])`,
+        [userId, nearestKeys]
+      );
+
+      // De-dupe by key (one user/key can have rows under multiple devices) and
+      // re-order by the step-1 similarity rank (SQL ANY() loses order).
+      const byKey = new Map();
+      for (const row of memRows.rows) {
+        if (!byKey.has(row.key)) byKey.set(row.key, row);
+      }
+      semantic = nearestKeys
+        .map(k => byKey.get(k))
+        .filter(Boolean)
+        .slice(0, 7);
+    } catch (dbErr) {
+      // FALLBACK: broken recall — req.body keys rarely overlap the nearest embeddings,
+      // so this yields ~0 semantic and degrades to the current broken 4-memory state.
+      // Better than crashing/returning empty, but NOT a working baseline. We warn so a
+      // memory-DB outage is visible instead of looking like a normal low-recall turn.
+      console.warn('[MEMORY] Semantic DB fetch failed — falling back to broken req.body recall (~0 semantic).', { userId, error: dbErr?.message });
+      const topKeys = new Set(nearestKeys);
+      semantic = allMemories.filter(m => topKeys.has(m.key)).slice(0, 7);
+    }
 
     const seen = new Set();
     const combined = [...alwaysOn, ...semantic].filter(m => {
@@ -2410,7 +2453,7 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
       );
     }
 
-    const systemPrompt = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext, founder: isFounder });
+    const { staticPrompt, dynamicPrompt } = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext, founder: isFounder });
 
 
     // Update last_referenced_at for injected memories (fire-and-forget)
@@ -2433,17 +2476,28 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
           : 0.85
         : 0.7;
 
-    const model = "claude-sonnet-4-6";
+    const model = CAL_CHAT_MODEL;
 
-    let fullSystemPrompt = systemPrompt;
-
-    // Identity / meta-awareness block
+    // Identity / meta-awareness block — per-user, so it lives in the dynamic
+    // (uncached) suffix, after the cache breakpoint.
+    let dynamicSuffix = dynamicPrompt;
     if (isMetaAware && req.userId === 3) {
-      fullSystemPrompt += '\n\n' + META_AWARE_BLOCK;
+      dynamicSuffix += '\n\n' + META_AWARE_BLOCK;
     } else if (isMetaAware) {
-      fullSystemPrompt += '\n\n' + NIKKI_AWARE_BLOCK;
+      dynamicSuffix += '\n\n' + NIKKI_AWARE_BLOCK;
     } else {
-      fullSystemPrompt += '\n\n' + IDENTITY_DEFLECTION_BLOCK;
+      dynamicSuffix += '\n\n' + IDENTITY_DEFLECTION_BLOCK;
+    }
+
+    // Prompt caching: the static character/canon/world/behavior prefix is the
+    // first block and carries the cache breakpoint; the per-request suffix
+    // (time-of-day, last-session summary, memories, identity block) follows it
+    // so the cached prefix stays byte-identical across turns.
+    const systemBlocks = [
+      { type: "text", text: staticPrompt, cache_control: { type: "ephemeral" } },
+    ];
+    if (dynamicSuffix.trim()) {
+      systemBlocks.push({ type: "text", text: dynamicSuffix });
     }
 
     // Cap history to last 40 messages before building conversation
@@ -2514,7 +2568,7 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
 
     const calResponse = await sendMessageToCal({
       mode,
-      systemPrompt: fullSystemPrompt,
+      systemPrompt: systemBlocks,
       conversationHistory,
     });
 
@@ -3238,12 +3292,15 @@ async function generateReEngagement(deviceId, userId, mode) {
 
   // 4. Build system prompt (always SLOW_BURN pace for re-engagement)
   const filteredMemories = buildMemoryContext(memories, mode, []);
-  const baseSystemPrompt = buildSystemPrompt({
+  const { staticPrompt, dynamicPrompt } = buildSystemPrompt({
     mode,
     pace: "SLOW_BURN",
     memories: filteredMemories,
     lastSessionSummary,
   });
+  // Re-engagement path uses a plain string; staticPrompt + dynamicPrompt
+  // reproduces the previous single-string output exactly.
+  const baseSystemPrompt = staticPrompt + dynamicPrompt;
 
   // 5. Tone-varying instruction based on unanswered count
   let reEngageInstruction;
