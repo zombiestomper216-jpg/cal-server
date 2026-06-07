@@ -4,6 +4,7 @@ import cors from "cors";
 import dotenv from "dotenv";
 import Anthropic from "@anthropic-ai/sdk";
 import pg from "pg";
+import { pathToFileURL } from "url";
 import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import crypto from "crypto";
@@ -235,6 +236,11 @@ always. Concern on autopilot, never.
 `;
 
 dotenv.config();
+
+// Only true when this file is the entry point (`node index.js`). When imported as a
+// library (e.g. the cal-eval harness) the server bootstrap below is skipped, so nothing
+// binds a port, schedules cron, or runs DB migrations on import.
+const RUN_AS_MAIN = !!process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 
 const { Pool } = pg;
 
@@ -569,7 +575,7 @@ async function runMigrations() {
   }
   console.log("[MIGRATION] Startup migrations complete.");
 }
-runMigrations();
+if (RUN_AS_MAIN) runMigrations();
 
 // One-time safety: ensure patreon_subscriptions exists
 if (db) {
@@ -886,7 +892,7 @@ async function saveMemoryEmbedding(userId, memoryKey, memoryValue) {
   }
 }
 
-async function getSemanticMemories(userId, queryText, allMemories, limit = 10) {
+export async function getSemanticMemories(userId, queryText, allMemories, limit = 10) {
   try {
     const queryEmbedding = await generateVoyageEmbedding(queryText);
     const result = await supabaseDb.query(`
@@ -3530,10 +3536,12 @@ Should Cal reach out right now?`;
   }
 }
 
-cron.schedule("0 */3 * * *", async () => {
-  console.log("[PROACTIVE] Running proactive Cal decision check");
-  await runProactiveCalDecision();
-});
+if (RUN_AS_MAIN) {
+  cron.schedule("0 */3 * * *", async () => {
+    console.log("[PROACTIVE] Running proactive Cal decision check");
+    await runProactiveCalDecision();
+  });
+}
 
 // -----------------------------------
 // Re-Engagement Endpoints
@@ -4627,15 +4635,40 @@ app.get("/presence/modes", (req, res) => {
 const resolvedPort = Number(process.env.PORT);
 const PORT = Number.isFinite(resolvedPort) ? resolvedPort : 8080;
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🔥 Cal server listening on 0.0.0.0:${PORT}`);
-});
+if (RUN_AS_MAIN) {
+  app.listen(PORT, "0.0.0.0", () => {
+    console.log(`🔥 Cal server listening on 0.0.0.0:${PORT}`);
+  });
 
-startNotificationScheduler();
+  startNotificationScheduler();
 
-// Keepalive log (helps confirm it isn't being killed)
-if (DEBUG_CHAT) {
-  setInterval(() => {
-    console.log("💚 still alive", { port: PORT, portEnv: process.env.PORT ?? null, ts: Date.now() });
-  }, 30000);
+  // Boot-time Voyage health check: surface a dead/invalid VOYAGE_API_KEY loudly at
+  // startup instead of failing silently per-turn in getSemanticMemories' catch. Fire
+  // one minimal embed; never crash the server (degraded retrieval beats down).
+  (async () => {
+    try {
+      const resp = await fetch('https://api.voyageai.com/v1/embeddings', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${process.env.VOYAGE_API_KEY}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ model: 'voyage-3-lite', input: ['healthcheck'] }),
+      });
+      if (resp.ok) {
+        console.log('[VOYAGE] key OK');
+      } else {
+        console.error(`[VOYAGE] STARTUP CHECK FAILED ${resp.status} — memory retrieval will fall back to unranked. Check VOYAGE_API_KEY.`);
+      }
+    } catch (e) {
+      console.error(`[VOYAGE] STARTUP CHECK FAILED ${e?.message || e} — memory retrieval will fall back to unranked. Check VOYAGE_API_KEY.`);
+    }
+  })();
+
+  // Keepalive log (helps confirm it isn't being killed)
+  if (DEBUG_CHAT) {
+    setInterval(() => {
+      console.log("💚 still alive", { port: PORT, portEnv: process.env.PORT ?? null, ts: Date.now() });
+    }, 30000);
+  }
 }
