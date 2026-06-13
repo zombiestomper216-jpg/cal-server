@@ -888,6 +888,7 @@ async function generateVoyageEmbedding(text) {
 }
 
 async function saveMemoryEmbedding(userId, memoryKey, memoryValue) {
+  throw new Error('FORCED EMBED FAILURE - invariant test');
   try {
     const embedding = await generateVoyageEmbedding(memoryValue);
     await supabaseDb.query(`
