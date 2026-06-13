@@ -2624,7 +2624,22 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
           const recurring = chatDeviceId ? trackRecurringThemes(chatDeviceId, userText, effectiveThreadId ?? crypto.randomUUID()) : [];
           const effectiveDeviceId = chatDeviceId || `user_${chatUserId}`;
 
+          // Auto-detect stays AUTOMATIC and high-confidence — it must work for
+          // every consumer-app user, none of whom have a Hub. The only change
+          // vs. the original is that the Voyage embed is now AWAITED and runs
+          // BEFORE the row becomes 'high', so each memory is born retrievable.
+          // This closes the orphan-faucet bug: the old code wrote 'high' then
+          // fired the embed without awaiting it, so any Voyage hiccup left a
+          // high-confidence memory with no embedding. Ordering embed-first
+          // (mirroring the approve path) means a Voyage failure throws before
+          // the write, leaving NO orphaned high row — it is simply re-detected
+          // next turn. Embeddings are user-scoped, so we only embed when a
+          // chatUserId exists; device-only memories never had embeddings and
+          // are unaffected.
           for (const mem of detected) {
+            if (chatUserId) {
+              await saveMemoryEmbedding(chatUserId, mem.key, mem.value);
+            }
             await db.query(
               `INSERT INTO memories (device_id, key, value, mode, confidence, type, user_id)
                VALUES ($1, $2, $3, $4, 'high', $5, $6)
@@ -2636,6 +2651,20 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
           }
 
           for (const mem of recurring) {
+            // Recurring themes fire on every recurrence, but ON CONFLICT DO
+            // NOTHING discards the write once the row exists. Check existence
+            // first so we embed (and write) only for a genuinely new theme —
+            // otherwise every recurrence burns a wasted Voyage call whose
+            // insert is then thrown away.
+            const exists = await db.query(
+              `SELECT 1 FROM memories WHERE device_id = $1 AND key = $2 LIMIT 1`,
+              [effectiveDeviceId, mem.key]
+            );
+            if (exists.rows.length > 0) continue;
+
+            if (chatUserId) {
+              await saveMemoryEmbedding(chatUserId, mem.key, mem.value);
+            }
             await db.query(
               `INSERT INTO memories (device_id, key, value, mode, confidence, type, user_id)
                VALUES ($1, $2, $3, $4, 'high', $5, $6)
@@ -3076,6 +3105,195 @@ app.delete("/memories/:id", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("DELETE /memories/:id error:", err);
     return res.status(500).json({ ok: false, error: "Failed to delete memory" });
+  }
+});
+
+// -----------------------------------
+// Presence Hub memory endpoints (unauthenticated; userId+deviceId in body,
+// matching the rest of the /presence/* surface the desktop client uses).
+//
+// Invariants (see Hub plan):
+//   I1  embed is AWAITED — ok:true only after saveMemoryEmbedding resolves.
+//   I2  a row becomes confidence='high' only AFTER its embedding is written
+//       (embed -> memory_embeddings -> then flip confidence). On embed
+//       failure the row stays 'low' (pending), never high-without-embedding.
+//   I3  these endpoints embed only on user-initiated transitions (manual add
+//       and approve). The pending ('low') queue is reserved for explicit Cal
+//       proposals; /chat auto-detect is automatic and writes 'high' + embed
+//       directly (see the /chat handler), so it never enters this queue.
+//   I4  mode/type enums validated server-side before any write.
+// -----------------------------------
+const VALID_MEMORY_MODES = new Set(["all", "sfw", "after_dark"]);
+const VALID_MEMORY_TYPES = new Set([
+  "identity",
+  "emotional_moment",
+  "relationship",
+  "world_detail",
+  "routine",
+  "preference",
+]);
+
+function normalizePriority(p) {
+  const n = parseInt(p, 10);
+  if (Number.isNaN(n)) return null;
+  return Math.min(10, Math.max(1, n));
+}
+
+// POST /presence/memory/add — user-authored memory: insert 'low', embed, flip 'high'
+app.post("/presence/memory/add", async (req, res) => {
+  try {
+    const { userId, deviceId, key, value, type } = req.body || {};
+    const mode = normalizeMemoryMode(req.body?.mode);
+    const priority = normalizePriority(req.body?.priority);
+
+    if (!userId || !deviceId || !key || !value) {
+      return res.status(400).json({ ok: false, error: "userId, deviceId, key, and value required" });
+    }
+    if (!VALID_MEMORY_MODES.has(mode)) {
+      return res.status(400).json({ ok: false, error: `Invalid mode: ${mode}` });
+    }
+    if (type != null && !VALID_MEMORY_TYPES.has(type)) {
+      return res.status(400).json({ ok: false, error: `Invalid type: ${type}` });
+    }
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Memory storage is not available." });
+    }
+
+    // 1) Insert as pending ('low') — not yet retrievable, not yet embedded.
+    const inserted = await db.query(
+      `INSERT INTO memories (device_id, key, value, mode, confidence, type, user_id, priority)
+       VALUES ($1, $2, $3, $4, 'low', $5, $6, $7)
+       ON CONFLICT (device_id, key)
+       DO UPDATE SET value = $3, mode = $4, confidence = 'low',
+                    type = COALESCE($5, memories.type),
+                    user_id = COALESCE($6, memories.user_id),
+                    priority = COALESCE($7, memories.priority),
+                    updated_at = NOW()
+       RETURNING *`,
+      [deviceId, key, value, mode, type || null, userId, priority]
+    );
+
+    // 2) Embed (AWAITED, I1). Throws on failure -> row stays 'low' (I2).
+    await saveMemoryEmbedding(userId, key, value);
+
+    // 3) Embedding landed -> promote to 'high' (I2).
+    const promoted = await db.query(
+      `UPDATE memories SET confidence = 'high', updated_at = NOW()
+       WHERE device_id = $1 AND key = $2
+       RETURNING *`,
+      [deviceId, key]
+    );
+
+    return res.json({ ok: true, embedded: true, memory: promoted.rows[0] || inserted.rows[0] });
+  } catch (err) {
+    console.error("POST /presence/memory/add error:", err.message);
+    return res.status(500).json({ ok: false, embedded: false, error: "Failed to save memory (left pending)" });
+  }
+});
+
+// GET /presence/memory/pending — list pending ('low') suggestions for the Hub queue
+app.get("/presence/memory/pending", async (req, res) => {
+  try {
+    const { userId, deviceId } = req.query;
+    if (!userId && !deviceId) {
+      return res.status(400).json({ ok: false, error: "userId or deviceId required" });
+    }
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Memory storage is not available." });
+    }
+
+    const result = await db.query(
+      `SELECT * FROM memories
+       WHERE (user_id = $1 OR (user_id IS NULL AND device_id = $2))
+         AND confidence = 'low'
+       ORDER BY created_at DESC
+       LIMIT 100`,
+      [userId ? parseInt(userId, 10) : null, deviceId || null]
+    );
+
+    return res.json({ ok: true, pending: result.rows });
+  } catch (err) {
+    console.error("GET /presence/memory/pending error:", err.message);
+    return res.status(500).json({ ok: false, error: "Failed to fetch pending memories" });
+  }
+});
+
+// POST /presence/memory/approve — the ONLY transition that embeds a Cal proposal (I3)
+app.post("/presence/memory/approve", async (req, res) => {
+  try {
+    const { userId, id } = req.body || {};
+    const editedValue = req.body?.value;
+    const editedType = req.body?.type;
+    const editedMode = req.body?.mode != null ? normalizeMemoryMode(req.body.mode) : null;
+
+    if (!userId || !id) {
+      return res.status(400).json({ ok: false, error: "userId and id required" });
+    }
+    if (editedMode != null && !VALID_MEMORY_MODES.has(editedMode)) {
+      return res.status(400).json({ ok: false, error: `Invalid mode: ${editedMode}` });
+    }
+    if (editedType != null && !VALID_MEMORY_TYPES.has(editedType)) {
+      return res.status(400).json({ ok: false, error: `Invalid type: ${editedType}` });
+    }
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Memory storage is not available." });
+    }
+
+    // Load the pending row to get its key + current value.
+    const existing = await db.query(
+      `SELECT * FROM memories WHERE id = $1 AND confidence = 'low'`,
+      [id]
+    );
+    if (existing.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Pending memory not found" });
+    }
+    const row = existing.rows[0];
+    const finalValue = (typeof editedValue === "string" && editedValue.trim()) ? editedValue : row.value;
+
+    // 1) Embed the final value (AWAITED, I1). Throws -> row stays 'low' (I2).
+    await saveMemoryEmbedding(parseInt(userId, 10), row.key, finalValue);
+
+    // 2) Embedding landed -> apply edits + promote to 'high' (I2). Guard on
+    //    confidence='low' so approve can't re-fire on an already-high row.
+    const updated = await db.query(
+      `UPDATE memories
+       SET value = $1, type = COALESCE($2, type), mode = COALESCE($3, mode),
+           confidence = 'high', updated_at = NOW()
+       WHERE id = $4 AND confidence = 'low'
+       RETURNING *`,
+      [finalValue, editedType || null, editedMode, id]
+    );
+
+    return res.json({ ok: true, embedded: true, memory: updated.rows[0] });
+  } catch (err) {
+    console.error("POST /presence/memory/approve error:", err.message);
+    return res.status(500).json({ ok: false, embedded: false, error: "Failed to approve memory (left pending)" });
+  }
+});
+
+// POST /presence/memory/reject — delete a pending suggestion (guarded to 'low')
+app.post("/presence/memory/reject", async (req, res) => {
+  try {
+    const { id } = req.body || {};
+    if (!id) {
+      return res.status(400).json({ ok: false, error: "id required" });
+    }
+    if (!db) {
+      return res.status(503).json({ ok: false, error: "Memory storage is not available." });
+    }
+
+    const result = await db.query(
+      `DELETE FROM memories WHERE id = $1 AND confidence = 'low' RETURNING *`,
+      [id]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ ok: false, error: "Pending memory not found" });
+    }
+
+    return res.json({ ok: true, deleted: result.rows[0] });
+  } catch (err) {
+    console.error("POST /presence/memory/reject error:", err.message);
+    return res.status(500).json({ ok: false, error: "Failed to reject memory" });
   }
 });
 
@@ -4665,7 +4883,21 @@ app.get("/presence/check", async (req, res) => {
       };
     }
 
-    return res.json({ pendingResponse, pendingAudio });
+    // Hub: count of pending ('low') memory suggestions, drives the nav blink.
+    let pendingMemoryCount = 0;
+    if (db) {
+      try {
+        const cnt = await db.query(
+          `SELECT COUNT(*)::int AS n FROM memories WHERE user_id = $1 AND confidence = 'low'`,
+          [parseInt(userId, 10)]
+        );
+        pendingMemoryCount = cnt.rows[0]?.n || 0;
+      } catch (e) {
+        console.warn("[presence/check] pending count failed:", e?.message);
+      }
+    }
+
+    return res.json({ pendingResponse, pendingAudio, pendingMemoryCount });
   } catch (err) {
     console.error("[presence/check] ERROR:", err);
     return res.status(500).json({ error: "Check failed" });
