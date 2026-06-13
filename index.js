@@ -2890,28 +2890,42 @@ app.post("/memories", requireAuth, async (req, res) => {
     }
 
     const userId = req.userId || null;
+
+    // Embed-first invariant (mirrors /presence/memory/add I1/I2): when the row
+    // is embeddable (userId present) insert as pending 'low', AWAIT the embed,
+    // then promote to 'high'. On embed failure control jumps to catch and the
+    // row stays 'low' — never high-without-embedding. Device-only rows (no
+    // userId) can't be embedded and are stored 'high' directly, as before.
+    const initialConfidence = userId ? "low" : "high";
     const result = await db.query(
       `INSERT INTO memories (device_id, key, value, mode, confidence, type, user_id)
-       VALUES ($1, $2, $3, $4, 'high', $5, $6)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        ON CONFLICT (device_id, key)
-       DO UPDATE SET value = $3, mode = $4, type = COALESCE($5, memories.type),
-                    user_id = COALESCE($6, memories.user_id), updated_at = NOW()
+       DO UPDATE SET value = $3, mode = $4, confidence = $5,
+                    type = COALESCE($6, memories.type),
+                    user_id = COALESCE($7, memories.user_id), updated_at = NOW()
        RETURNING *`,
-      [device_id, key, value, normalizeMemoryMode(req.body.mode), type, userId]
+      [device_id, key, value, normalizeMemoryMode(req.body.mode), initialConfidence, type, userId]
     );
 
-    // Generate and store embedding in Supabase (fire-and-forget)
-    if (req.userId && result.rows[0]) {
-      saveMemoryEmbedding(req.userId, key, value);
+    if (userId && result.rows[0]) {
+      // Embed (AWAITED). Throws -> caught below, row stays 'low' (pending).
+      await saveMemoryEmbedding(userId, key, value);
+
+      // Embedding landed -> promote to 'high'.
+      const promoted = await db.query(
+        `UPDATE memories SET confidence = 'high', updated_at = NOW()
+         WHERE device_id = $1 AND key = $2
+         RETURNING *`,
+        [device_id, key]
+      );
+      return res.json({ ok: true, embedded: true, memory: promoted.rows[0] || result.rows[0] });
     }
 
-    return res.json({
-      ok: true,
-      memory: result.rows[0],
-    });
+    return res.json({ ok: true, embedded: false, memory: result.rows[0] });
   } catch (err) {
     console.error("POST /memories error:", err);
-    return res.status(500).json({ ok: false, error: "Failed to create memory" });
+    return res.status(500).json({ ok: false, embedded: false, error: "Failed to save memory (left pending)" });
   }
 });
 
