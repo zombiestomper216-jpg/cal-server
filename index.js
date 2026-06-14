@@ -938,6 +938,27 @@ export async function getSemanticMemories(userId, queryText, mode) {
   }
 }
 
+// Fetch the full mode-scoped memory set for a user, server-side. This is the
+// source of truth for assembly — reserved buckets (identity/routine/world_detail)
+// fill from here by priority regardless of semantic relevance, so always-on
+// anchors never depend on what the client sent. Mirrors the mode filter used
+// in getSemanticMemories' resolve and buildMemoryContext's top-level filter.
+async function fetchUserMemories(userId, mode) {
+  try {
+    const result = await db.query(
+      `SELECT * FROM memories
+       WHERE user_id = $1
+         AND confidence = 'high'
+         AND (mode IS NULL OR mode = $2 OR mode = 'all')`,
+      [userId, mode]
+    );
+    return result.rows;
+  } catch (err) {
+    console.warn('[MEMORY] Server-side memory fetch failed, falling back to request-body set:', err?.message);
+    return null;
+  }
+}
+
 // Relevance decay penalty based on last_referenced_at / updated_at age
 function decayPenalty(memory) {
   const ref = memory.last_referenced_at || memory.updated_at || memory.created_at;
@@ -2419,14 +2440,21 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
     const weather = await weatherPromise;
     const realtimeContext = buildRealtimeContext(weather);
 
-    // Compute semantic ranking first (logged-in users with a query only),
-    // then let buildMemoryContext assemble using it. No more wholesale override.
+    // Compute semantic ranking first (logged-in users with a query only).
+    // Assemble from the SERVER-SIDE full memory set (source of truth), not the
+    // client-supplied `memories` — so the ranked population and the assembled
+    // population are identical and reserved-bucket anchors are reliable.
     let semanticRank = null;
+    let assemblyMemories = memories; // fallback: request-body set
     const lastUserMessage = messages.filter(m => m.role === 'user').slice(-1)[0];
-    if (lastUserMessage && req.userId) {
-      semanticRank = await getSemanticMemories(req.userId, lastUserMessage.content, mode);
+    if (req.userId) {
+      const serverMemories = await fetchUserMemories(req.userId, mode);
+      if (serverMemories) assemblyMemories = serverMemories;
+      if (lastUserMessage) {
+        semanticRank = await getSemanticMemories(req.userId, lastUserMessage.content, mode);
+      }
     }
-    const filteredMemories = buildMemoryContext(memories, mode, messages, semanticRank);
+    const filteredMemories = buildMemoryContext(assemblyMemories, mode, messages, semanticRank);
 
     const { staticPrompt, dynamicPrompt } = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext, founder: isFounder });
 
