@@ -42,8 +42,10 @@ export async function voyageRerank(query, documents, topK = null) {
     body: JSON.stringify(body)
   });
   const data = await response.json();
-  if (!data.results) {
+  if (!data.data || !Array.isArray(data.data)) {
     throw new Error(`Voyage rerank error: ${JSON.stringify(data)}`);
   }
-  return data.results; // [{ index, document, relevance_score }], desc by score
+  // REST endpoint returns results under `data`, sorted desc by relevance_score.
+  // Each element: { index, relevance_score } (index points into the input documents array).
+  return data.data;
 }
