@@ -28,6 +28,7 @@ import {
   NIKKI_AWARE_BLOCK,
 } from "./prompts.js";
 import { sendMessageToCal, checkEasterEgg, CAL_CHAT_MODEL } from "./cal.js";
+import { generateVoyageEmbedding, voyageRerank } from "./voyage.js";
 import { generateCalMessage } from "./generateCalMessage.js";
 import { start as startNotificationScheduler } from "./notificationScheduler.js";
 
@@ -866,27 +867,6 @@ basePrompt = CAL_SFW_SYSTEM_PROMPT;  }
   return { staticPrompt: basePrompt, dynamicPrompt };
 }
 
-async function generateVoyageEmbedding(text) {
-  const response = await fetch('https://api.voyageai.com/v1/embeddings', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${process.env.VOYAGE_API_KEY}`,
-      'Content-Type': 'application/json'
-    },
-    body: JSON.stringify({
-      model: 'voyage-3-lite',
-      input: text
-    })
-  });
-  const data = await response.json();
-  console.log('Voyage response status:', response.status);
-  console.log('Voyage response data:', JSON.stringify(data).slice(0, 200));
-  if (!data.data || !data.data[0]) {
-    throw new Error(`Voyage API error: ${JSON.stringify(data)}`);
-  }
-  return data.data[0].embedding;
-}
-
 async function saveMemoryEmbedding(userId, memoryKey, memoryValue) {
   try {
     const embedding = await generateVoyageEmbedding(memoryValue);
@@ -902,69 +882,59 @@ async function saveMemoryEmbedding(userId, memoryKey, memoryValue) {
   }
 }
 
-export async function getSemanticMemories(userId, queryText, allMemories, limit = 10) {
+const SEMANTIC_CANDIDATE_POOL = 30;
+
+// Pure relevance signal. Returns a Map of memory_key -> rank position
+// (0 = most relevant), or null if no usable ranking could be produced
+// (caller falls back to non-semantic ordering in buildMemoryContext).
+export async function getSemanticMemories(userId, queryText, mode) {
   try {
     const queryEmbedding = await generateVoyageEmbedding(queryText);
 
-    // Step 1 — nearest memory_keys from the embeddings DB (SUPABASE_DATABASE_URL),
-    // in similarity order.
     const result = await supabaseDb.query(`
       SELECT memory_key
       FROM memory_embeddings
       WHERE user_id = $2
       ORDER BY embedding <=> $1::vector
       LIMIT $3
-    `, [JSON.stringify(queryEmbedding), userId, limit]);
+    `, [JSON.stringify(queryEmbedding), userId, SEMANTIC_CANDIDATE_POOL]);
 
-    if (!result.rows.length) return allMemories;
+    if (!result.rows.length) return null;
+    const candidateKeys = result.rows.map(r => r.memory_key);
 
-    const nearestKeys = result.rows.map(r => r.memory_key); // similarity order
+    // Resolve to memory text WITH mode scoping (mirrors buildMemoryContext's filter).
+    const memRows = await db.query(
+      `SELECT * FROM memories
+       WHERE user_id = $1
+         AND key = ANY($2::text[])
+         AND (mode IS NULL OR mode = $3 OR mode = 'all')`,
+      [userId, candidateKeys, mode]
+    );
+    if (!memRows.rows.length) return null;
 
-    // 4 always-on — kept exactly as before (from req.body, by type).
-    const alwaysOn = allMemories.filter(m =>
-      m.type === 'identity' || m.type === 'routine'
-    ).slice(0, 4);
+    const byKey = new Map();
+    for (const row of memRows.rows) {
+      if (!byKey.has(row.key)) byKey.set(row.key, row);
+    }
+    const survivors = candidateKeys.map(k => byKey.get(k)).filter(Boolean);
+    if (!survivors.length) return null;
 
-    // Step 2 — resolve the nearest keys to memory text DIRECTLY from the memory DB
-    // (DATABASE_URL), server-side. This removes the dependency on req.body, which
-    // sends a subset that rarely contains the nearest-by-embedding keys.
-    let semantic;
+    let rankedKeys;
     try {
-      const memRows = await db.query(
-        `SELECT * FROM memories WHERE user_id = $1 AND key = ANY($2::text[])`,
-        [userId, nearestKeys]
-      );
-
-      // De-dupe by key (one user/key can have rows under multiple devices) and
-      // re-order by the step-1 similarity rank (SQL ANY() loses order).
-      const byKey = new Map();
-      for (const row of memRows.rows) {
-        if (!byKey.has(row.key)) byKey.set(row.key, row);
-      }
-      semantic = nearestKeys
-        .map(k => byKey.get(k))
-        .filter(Boolean)
-        .slice(0, 7);
-    } catch (dbErr) {
-      // FALLBACK: broken recall — req.body keys rarely overlap the nearest embeddings,
-      // so this yields ~0 semantic and degrades to the current broken 4-memory state.
-      // Better than crashing/returning empty, but NOT a working baseline. We warn so a
-      // memory-DB outage is visible instead of looking like a normal low-recall turn.
-      console.warn('[MEMORY] Semantic DB fetch failed — falling back to broken req.body recall (~0 semantic).', { userId, error: dbErr?.message });
-      const topKeys = new Set(nearestKeys);
-      semantic = allMemories.filter(m => topKeys.has(m.key)).slice(0, 7);
+      const docs = survivors.map(m => m.value);
+      const reranked = await voyageRerank(queryText, docs);
+      rankedKeys = reranked.map(r => survivors[r.index].key);
+    } catch (rerankErr) {
+      console.warn('[MEMORY] Voyage rerank failed — falling back to cosine order. Reranking OFF this turn.', { userId, error: rerankErr?.message });
+      rankedKeys = survivors.map(m => m.key);
     }
 
-    const seen = new Set();
-    const combined = [...alwaysOn, ...semantic].filter(m => {
-      if (seen.has(m.key)) return false;
-      seen.add(m.key);
-      return true;
-    });
-    return combined.slice(0, 10);
+    const rankMap = new Map();
+    rankedKeys.forEach((k, i) => rankMap.set(k, i));
+    return rankMap;
   } catch (err) {
-    console.error('Semantic memory error, falling back to standard:', err);
-    return allMemories;
+    console.error('[MEMORY] Semantic retrieval failed entirely, no ranking produced:', err);
+    return null;
   }
 }
 
@@ -986,7 +956,7 @@ const EMOTIONAL_TONE_KEYWORDS = [
 ];
 
 // Selective memory recall: strict mode scoping, relevance scoring, decay, 3-5 max
-function buildMemoryContext(allMemories, mode, messages = []) {
+function buildMemoryContext(allMemories, mode, messages = [], semanticRank = null) {
   if (!allMemories || allMemories.length === 0) return [];
 
   // Strict mode scoping: only matching mode or 'all'
@@ -1046,49 +1016,58 @@ function buildMemoryContext(allMemories, mode, messages = []) {
     return new Date(b.updated_at) - new Date(a.updated_at);
   });
 
-  // Selective recall: 20 memories max (4 routine + 4 world_detail + 12 flex)
+  // Selective recall: 20 max (4 identity + 4 routine + 4 world_detail + 8 flex)
   const TOTAL_SLOTS = 20;
+  const IDENTITY_SLOTS = 4;
   const ROUTINE_SLOTS = 4;
   const WORLD_DETAIL_SLOTS = 4;
-  const FLEX_SLOTS = TOTAL_SLOTS - ROUTINE_SLOTS - WORLD_DETAIL_SLOTS; // 12
+  const FLEX_SLOTS = TOTAL_SLOTS - IDENTITY_SLOTS - ROUTINE_SLOTS - WORLD_DETAIL_SLOTS; // 8
 
+  const identityPool    = sorted.filter(m => m.type === "identity");
   const routinePool     = sorted.filter(m => m.type === "routine");
   const worldDetailPool = sorted.filter(m => m.type === "world_detail");
 
+  const identityPick    = identityPool.slice(0, IDENTITY_SLOTS);
   const routinePick     = routinePool.slice(0, ROUTINE_SLOTS);
   const worldDetailPick = worldDetailPool.slice(0, WORLD_DETAIL_SLOTS);
 
-  // Overflow: unfilled reserved slots go back into flex pool
-  const unusedRoutineSlots     = ROUTINE_SLOTS - routinePick.length;
-  const unusedWorldDetailSlots = WORLD_DETAIL_SLOTS - worldDetailPick.length;
-  const extraFlexSlots         = unusedRoutineSlots + unusedWorldDetailSlots;
+  const extraFlexSlots =
+    (IDENTITY_SLOTS - identityPick.length) +
+    (ROUTINE_SLOTS - routinePick.length) +
+    (WORLD_DETAIL_SLOTS - worldDetailPick.length);
 
-  // Build flex candidates from overflow of reserved pools + everything else, re-sorted by score
   const overflowCandidates = [
+    ...identityPool.slice(IDENTITY_SLOTS),
     ...routinePool.slice(ROUTINE_SLOTS),
     ...worldDetailPool.slice(WORLD_DETAIL_SLOTS),
-    ...sorted.filter(m => m.type !== "routine" && m.type !== "world_detail"),
+    ...sorted.filter(m => m.type !== "identity" && m.type !== "routine" && m.type !== "world_detail"),
   ].sort((a, b) => {
-    // Priority (highest first); missing/null/undefined treated as 0
     const prioA = Number(a.priority) || 0;
     const prioB = Number(b.priority) || 0;
     if (prioA !== prioB) return prioB - prioA;
-    const relA = relevance(a);
-    const relB = relevance(b);
-    if (relA !== relB) return relB - relA;
+
+    if (semanticRank) {
+      const rankA = semanticRank.has(a.key) ? semanticRank.get(a.key) : Infinity;
+      const rankB = semanticRank.has(b.key) ? semanticRank.get(b.key) : Infinity;
+      if (rankA !== rankB) return rankA - rankB;
+    } else {
+      const relA = relevance(a);
+      const relB = relevance(b);
+      if (relA !== relB) return relB - relA;
+    }
+
     if (a.confidence === "high" && b.confidence !== "high") return -1;
     if (b.confidence === "high" && a.confidence !== "high") return 1;
     return new Date(b.updated_at) - new Date(a.updated_at);
   });
 
   const flexPick = overflowCandidates.slice(0, FLEX_SLOTS + extraFlexSlots);
+  const selected = [...identityPick, ...routinePick, ...worldDetailPick, ...flexPick];
 
-  const selected = [...routinePick, ...worldDetailPick, ...flexPick];
-
-  // Diagnostic logging — remove after investigation
-  console.log(`[MEMORY COUNT] ${selected.length} memories injected`);
+  console.log(`[MEMORY COUNT] ${selected.length} injected (semantic: ${semanticRank ? 'on' : 'off'})`);
   for (const m of selected) {
-    console.log(`[MEMORY INJECT] [p${m.priority ?? 0}] ${m.key}: ${m.value}`);
+    const r = semanticRank && semanticRank.has(m.key) ? `r${semanticRank.get(m.key)}` : 'r-';
+    console.log(`[MEMORY INJECT] [p${m.priority ?? 0}][${r}] ${m.key}: ${m.value}`);
   }
 
   return selected;
@@ -2440,18 +2419,14 @@ app.post("/chat", requireAuth, chatLimiter, async (req, res) => {
     const weather = await weatherPromise;
     const realtimeContext = buildRealtimeContext(weather);
 
-    let filteredMemories = buildMemoryContext(memories, mode, messages);
-
-    // Upgrade to semantic retrieval if we have a query to work with
+    // Compute semantic ranking first (logged-in users with a query only),
+    // then let buildMemoryContext assemble using it. No more wholesale override.
+    let semanticRank = null;
     const lastUserMessage = messages.filter(m => m.role === 'user').slice(-1)[0];
     if (lastUserMessage && req.userId) {
-      filteredMemories = await getSemanticMemories(
-        req.userId,
-        lastUserMessage.content,
-        memories,
-        10
-      );
+      semanticRank = await getSemanticMemories(req.userId, lastUserMessage.content, mode);
     }
+    const filteredMemories = buildMemoryContext(memories, mode, messages, semanticRank);
 
     const { staticPrompt, dynamicPrompt } = buildSystemPrompt({ mode, pace, memories: filteredMemories, lastSessionSummary, realtimeContext, founder: isFounder });
 
